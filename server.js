@@ -1,7 +1,6 @@
 const express = require('express');
 const { createClient } = require('@libsql/client');
 const cors = require('cors');
-const path = require('path');
 const ExcelJS = require('exceljs');
 
 const app = express();
@@ -690,11 +689,6 @@ app.put('/api/config', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
-// ─── SERVE FRONTEND ───────────────────────────────────────────────────────────
-const clientDist = path.join(__dirname, 'client', 'dist');
-app.use(express.static(clientDist));
-app.get('*', (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
 
 // Local dev entry point
 if (require.main === module) {
