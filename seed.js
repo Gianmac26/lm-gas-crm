@@ -129,6 +129,7 @@ async function ensureSchema() {
               body TEXT,
               direction TEXT DEFAULT 'inbound',
               type TEXT DEFAULT 'text',
+              client_request_id TEXT,
               wa_message_id TEXT,
               status TEXT DEFAULT 'received',
               error_code TEXT,
@@ -156,6 +157,7 @@ async function ensureSchema() {
     ['body', 'TEXT'],
     ['direction', `TEXT DEFAULT 'inbound'`],
     ['type', `TEXT DEFAULT 'text'`],
+    ['client_request_id', 'TEXT'],
     ['wa_message_id', 'TEXT'],
     ['status', `TEXT DEFAULT 'received'`],
     ['error_code', 'TEXT'],
@@ -186,6 +188,7 @@ async function ensureSchema() {
 
   await db.execute({ sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_conversations_phone_normalized ON wa_conversations(phone_normalized)', args: [] });
   await db.execute({ sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_messages_wa_message_id ON wa_messages(wa_message_id)', args: [] });
+  await db.execute({ sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_messages_client_request_id ON wa_messages(client_request_id)', args: [] });
   await db.execute({ sql: 'CREATE INDEX IF NOT EXISTS idx_wa_messages_conversation_created ON wa_messages(conversation_id, created_at)', args: [] });
   await db.execute({ sql: 'CREATE INDEX IF NOT EXISTS idx_clients_phone_normalized ON clients(phone_normalized)', args: [] });
 
