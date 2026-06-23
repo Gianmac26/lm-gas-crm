@@ -6,7 +6,8 @@
     "install:all": "npm install && cd client && npm install",
     "dev": "concurrently \"nodemon server.js\" \"cd client && npm run dev\"",
     "start": "node server.js",
-    "seed": "node seed.js"
+    "seed": "node seed.js",
+    "vercel-build": "cd client && npm install && npm run build"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
