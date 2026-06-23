@@ -12,6 +12,8 @@ import OrderForm from './components/OrderForm.jsx';
 import Riders from './components/Riders.jsx';
 import Reports from './components/Reports.jsx';
 import Config from './components/Config.jsx';
+import Conversations from './components/Conversations.jsx';
+import ConversationDetail from './components/ConversationDetail.jsx';
 
 export const AppContext = createContext(null);
 
@@ -59,6 +61,8 @@ export default function App() {
           <Route path="riders" element={<Riders />} />
           <Route path="reports" element={<Reports />} />
           <Route path="config" element={<Config />} />
+          <Route path="conversations" element={<Conversations />} />
+          <Route path="conversations/:id" element={<ConversationDetail />} />
         </Route>
       </Routes>
     </AppContext.Provider>
