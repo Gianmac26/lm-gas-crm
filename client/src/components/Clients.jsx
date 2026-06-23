@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { clients } from '../api.js';
-import { Plus, Search, Star, ChevronRight, MapPin, Phone } from 'lucide-react';
+import { Plus, Search, Star, ChevronRight, MapPin, Users2 } from 'lucide-react';
 
 const ZONES = ['Todas', 'San Borja', 'Surco', 'Miraflores', 'Otra'];
 const TYPES = ['Todos', 'Residencial', 'Negocio'];
@@ -17,16 +17,21 @@ export default function Clients() {
   const [zone, setZone] = useState('');
   const [type, setType] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const nav = useNavigate();
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const params = {};
       if (q)    params.q    = q;
       if (zone && zone !== 'Todas') params.zone = zone;
       if (type && type !== 'Todos') params.type = type;
       setList(await clients.list(params));
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Error al cargar clientes');
+      setList([]);
     } finally { setLoading(false); }
   }, [q, zone, type]);
 
@@ -81,6 +86,13 @@ export default function Clients() {
           <Plus size={16} /> Nuevo
         </button>
       </div>
+
+      {/* Error */}
+      {error && (
+        <div className="rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-4 text-sm text-red-700 dark:text-red-400">
+          ⚠ {error}
+        </div>
+      )}
 
       {/* List */}
       {loading ? (
