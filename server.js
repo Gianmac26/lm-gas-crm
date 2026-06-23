@@ -690,20 +690,6 @@ app.put('/api/config', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const path = require('path');
-const fs = require('fs');
-const distPath = path.join(__dirname, 'client', 'dist');
-
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/webhook')) {
-      return next();
-    }
-    res.sendFile(path.join(distPath, 'index.html'));
-  });
-}
-
 // Local dev entry point
 if (require.main === module) {
   const PORT = process.env.PORT || 3001;
