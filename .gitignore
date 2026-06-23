@@ -1,0 +1,27 @@
+# Dependencias
+node_modules/
+client/node_modules/
+
+# Base de datos local (no subir a GitHub)
+database/
+*.db
+*.db-shm
+*.db-wal
+
+# Variables de entorno (nunca subir claves reales)
+.env
+.env.local
+
+# Build del frontend
+client/dist/
+
+# Claude Code (configuración local del editor)
+.claude/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { -webkit-tap-highlight-color: transparent; }
+  body { @apply bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100; }
+  * { box-sizing: border-box; }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white font-semibold
+           px-5 py-3 rounded-xl transition-colors touch-manipulation select-none;
+  }
+  .btn-secondary {
+    @apply bg-blue-900 hover:bg-blue-800 active:bg-blue-950 text-white font-semibold
+           px-5 py-3 rounded-xl transition-colors touch-manipulation select-none;
+  }
+  .btn-ghost {
+    @apply bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700
+           text-gray-700 dark:text-gray-200 font-medium px-4 py-2.5 rounded-xl
+           transition-colors touch-manipulation select-none;
+  }
+  .btn-danger {
+    @apply bg-red-500 hover:bg-red-600 text-white font-semibold px-4 py-2.5 rounded-xl transition-colors;
+  }
+  .card {
+    @apply bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700;
+  }
+  .input {
+    @apply w-full border border-gray-300 dark:border-gray-600 rounded-xl px-4 py-3 text-base
+           bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100
+           focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent
+           placeholder-gray-400 dark:placeholder-gray-500;
+  }
+  .label {
+    @apply block text-sm font-semibold text-gray-600 dark:text-gray-400 mb-1.5;
+  }
+  .badge-pending   { @apply bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300; }
+  .badge-transit   { @apply bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300; }
+  .badge-delivered { @apply bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300; }
+  .badge-cancelled { @apply bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300; }
+}
+
+/* Safe area for iOS */
+.pb-safe { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+
+/* Smooth scrolling */
+.scroll-smooth { scroll-behavior: smooth; }
+
+/* Hide scrollbar but keep scroll */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
