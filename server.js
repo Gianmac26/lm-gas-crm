@@ -116,6 +116,7 @@ async function initDb() {
   ], 'write');
 
   await migrateWhatsappSchema();
+  await migratePaymentsSchema();
 
   const defaults = {
     pin: '1234', daily_goal: '80', price_10kg: '38', price_40kg: '120',
@@ -264,6 +265,80 @@ async function migrateWhatsappSchema() {
 
   await migrateLegacyWhatsappMessages();
   await rebuildConversationSummaries();
+}
+
+async function migratePaymentsSchema() {
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS payments (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id          INTEGER NOT NULL,
+      amount            REAL NOT NULL,
+      method            TEXT NOT NULL,
+      destination       TEXT NOT NULL,
+      operation_number  TEXT,
+      status            TEXT NOT NULL DEFAULT 'reportado',
+      reported_by       TEXT,
+      reported_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      confirmed_by      TEXT,
+      confirmed_at      DATETIME,
+      rejection_reason  TEXT,
+      notes             TEXT,
+      client_request_id TEXT,
+      created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id)`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_client_request_id ON payments(client_request_id) WHERE client_request_id IS NOT NULL`,
+    args: [],
+  });
+
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS cash_handovers (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id   INTEGER NOT NULL,
+      rider_id     INTEGER NOT NULL,
+      amount       REAL NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'en_poder_motorizado',
+      handed_to    TEXT,
+      handed_by    TEXT,
+      handed_at    DATETIME,
+      confirmed_by TEXT,
+      confirmed_at DATETIME,
+      notes        TEXT,
+      created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_handovers_payment_id ON cash_handovers(payment_id)`,
+    args: [],
+  });
+
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS payment_events (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id       INTEGER NOT NULL,
+      cash_handover_id INTEGER,
+      event_type       TEXT NOT NULL,
+      previous_status  TEXT,
+      new_status       TEXT,
+      performed_by     TEXT,
+      notes            TEXT,
+      created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE INDEX IF NOT EXISTS idx_payment_events_payment_id ON payment_events(payment_id)`,
+    args: [],
+  });
 }
 
 async function backfillClientPhones() {
@@ -1662,6 +1737,517 @@ app.put('/api/config', async (req, res) => {
     );
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── PAYMENTS ────────────────────────────────────────────────────────────────
+
+const VALID_PAYMENT_METHODS  = ['yape', 'efectivo', 'tarjeta', 'transferencia'];
+const VALID_CONFIRMED_BY     = ['luis', 'gisela', 'admin'];
+const VALID_HANDED_TO        = ['luis', 'gisela'];
+
+const DESTINATIONS_BY_METHOD = {
+  efectivo:      ['efectivo_motorizado'],
+  yape:          ['yape_luis', 'yape_gisela'],
+  tarjeta:       ['pos_lm'],
+  transferencia: ['bcp_lm', 'bcp_luis', 'bcp_gisela', 'bbva_lm', 'otro'],
+};
+
+function validateMethodDestination(method, destination) {
+  if (!VALID_PAYMENT_METHODS.includes(method)) {
+    return `method inválido: '${method}'. Valores: ${VALID_PAYMENT_METHODS.join(', ')}`;
+  }
+  const valid = DESTINATIONS_BY_METHOD[method] || [];
+  if (!valid.includes(destination)) {
+    return `destination '${destination}' no es válida para method '${method}'. Válidas: ${valid.join(', ')}`;
+  }
+  return null;
+}
+
+async function insertPaymentEvent({ paymentId, cashHandoverId = null, eventType, previousStatus = null, newStatus = null, performedBy = null, notes = null }) {
+  await db.execute({
+    sql: `INSERT INTO payment_events (payment_id, cash_handover_id, event_type, previous_status, new_status, performed_by, notes, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [paymentId, cashHandoverId, eventType, previousStatus, newStatus, performedBy, notes, isoNow()],
+  });
+}
+
+// POST /api/orders/:id/payments
+app.post('/api/orders/:id/payments', async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const { amount, method, destination, operation_number, notes, client_request_id } = req.body;
+
+    const order = row(await db.execute({
+      sql: 'SELECT id, total, rider_id, status FROM orders WHERE id = ?',
+      args: [orderId],
+    }));
+    if (!order) return res.status(404).json({ error: 'Pedido no encontrado' });
+
+    // Idempotency: same client_request_id → return existing
+    if (client_request_id) {
+      const dup = row(await db.execute({
+        sql: 'SELECT * FROM payments WHERE client_request_id = ?',
+        args: [client_request_id],
+      }));
+      if (dup) {
+        const handover = row(await db.execute({
+          sql: 'SELECT * FROM cash_handovers WHERE payment_id = ?',
+          args: [dup.id],
+        }));
+        return res.json({ payment: dup, cash_handover: handover });
+      }
+    }
+
+    const amt = Number(amount);
+    if (!amt || amt <= 0) return res.status(400).json({ error: 'amount debe ser mayor que cero' });
+    if (amt > order.total + 0.001) {
+      return res.status(400).json({ error: `amount (${amt}) supera el total del pedido (${order.total})` });
+    }
+
+    const methodErr = validateMethodDestination(method, destination);
+    if (methodErr) return res.status(400).json({ error: methodErr });
+
+    const existing = row(await db.execute({
+      sql: 'SELECT id, status FROM payments WHERE order_id = ?',
+      args: [orderId],
+    }));
+    if (existing) {
+      return res.status(409).json({
+        error: 'Ya existe un pago para este pedido',
+        payment_id: existing.id,
+        payment_status: existing.status,
+      });
+    }
+
+    if (method === 'efectivo' && !order.rider_id) {
+      return res.status(400).json({
+        error: 'No se puede registrar pago en efectivo: el pedido no tiene motorizado asignado',
+        code: 'NO_RIDER',
+      });
+    }
+
+    const now = isoNow();
+
+    const payResult = await db.execute({
+      sql: `INSERT INTO payments
+              (order_id, amount, method, destination, operation_number, status,
+               reported_by, reported_at, notes, client_request_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'reportado', 'admin', ?, ?, ?, ?, ?)`,
+      args: [orderId, amt, method, destination, operation_number || null,
+             now, notes || null, client_request_id || null, now, now],
+    });
+    const paymentId = lastId(payResult);
+
+    await insertPaymentEvent({
+      paymentId,
+      eventType: 'pago_registrado',
+      newStatus: 'reportado',
+      performedBy: 'admin',
+      notes: `${method} → ${destination}${operation_number ? ` op:${operation_number}` : ''}`,
+    });
+
+    let handover = null;
+
+    if (method === 'efectivo') {
+      const hResult = await db.execute({
+        sql: `INSERT INTO cash_handovers (payment_id, rider_id, amount, status, created_at, updated_at)
+              VALUES (?, ?, ?, 'en_poder_motorizado', ?, ?)`,
+        args: [paymentId, order.rider_id, amt, now, now],
+      });
+      const handoverId = lastId(hResult);
+
+      await insertPaymentEvent({
+        paymentId,
+        cashHandoverId: handoverId,
+        eventType: 'efectivo_en_poder_motorizado',
+        newStatus: 'en_poder_motorizado',
+        performedBy: 'admin',
+      });
+
+      handover = row(await db.execute({
+        sql: 'SELECT * FROM cash_handovers WHERE id = ?',
+        args: [handoverId],
+      }));
+    }
+
+    const payment = row(await db.execute({
+      sql: 'SELECT * FROM payments WHERE id = ?',
+      args: [paymentId],
+    }));
+
+    res.status(201).json({ payment, cash_handover: handover });
+  } catch (err) {
+    if (err.message?.includes('UNIQUE constraint failed: payments.order_id')) {
+      return res.status(409).json({ error: 'Ya existe un pago para este pedido' });
+    }
+    if (err.message?.includes('UNIQUE constraint failed: payments.client_request_id')) {
+      return res.status(409).json({ error: 'client_request_id ya utilizado' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/orders/:id/payments
+app.get('/api/orders/:id/payments', async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const payment = row(await db.execute({
+      sql: 'SELECT * FROM payments WHERE order_id = ?',
+      args: [orderId],
+    }));
+
+    if (!payment) return res.json({ payment: null, cash_handover: null, events: [] });
+
+    const handover = row(await db.execute({
+      sql: 'SELECT * FROM cash_handovers WHERE payment_id = ?',
+      args: [payment.id],
+    }));
+
+    const events = rows(await db.execute({
+      sql: 'SELECT * FROM payment_events WHERE payment_id = ? ORDER BY created_at ASC',
+      args: [payment.id],
+    }));
+
+    res.json({ payment, cash_handover: handover, events });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/payments/:id/confirm
+app.patch('/api/payments/:id/confirm', async (req, res) => {
+  try {
+    const paymentId = Number(req.params.id);
+    const { confirmed_by } = req.body;
+
+    if (!VALID_CONFIRMED_BY.includes(confirmed_by)) {
+      return res.status(400).json({ error: `confirmed_by inválido. Valores: ${VALID_CONFIRMED_BY.join(', ')}` });
+    }
+
+    const payment = row(await db.execute({
+      sql: 'SELECT * FROM payments WHERE id = ?',
+      args: [paymentId],
+    }));
+    if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
+
+    if (payment.status === 'confirmado') {
+      return res.json({ payment, message: 'Ya confirmado' });
+    }
+
+    if (payment.status === 'rechazado') {
+      return res.status(409).json({ error: 'No se puede confirmar un pago rechazado' });
+    }
+
+    if (payment.method === 'efectivo') {
+      const handover = row(await db.execute({
+        sql: 'SELECT status FROM cash_handovers WHERE payment_id = ?',
+        args: [paymentId],
+      }));
+      if (!handover || handover.status !== 'confirmado') {
+        return res.status(409).json({
+          error: 'El pago en efectivo requiere que la rendición del motorizado esté confirmada primero',
+          code: 'HANDOVER_NOT_CONFIRMED',
+          handover_status: handover?.status || null,
+        });
+      }
+    }
+
+    const now = isoNow();
+    await db.execute({
+      sql: `UPDATE payments SET status = 'confirmado', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`,
+      args: [confirmed_by, now, now, paymentId],
+    });
+
+    await insertPaymentEvent({
+      paymentId,
+      eventType: 'pago_confirmado',
+      previousStatus: payment.status,
+      newStatus: 'confirmado',
+      performedBy: confirmed_by,
+    });
+
+    const updated = row(await db.execute({ sql: 'SELECT * FROM payments WHERE id = ?', args: [paymentId] }));
+    res.json({ payment: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/payments/:id/reject
+app.patch('/api/payments/:id/reject', async (req, res) => {
+  try {
+    const paymentId = Number(req.params.id);
+    const { confirmed_by, reason } = req.body;
+
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ error: 'reason es obligatorio' });
+    }
+    if (!VALID_CONFIRMED_BY.includes(confirmed_by)) {
+      return res.status(400).json({ error: `confirmed_by inválido. Valores: ${VALID_CONFIRMED_BY.join(', ')}` });
+    }
+
+    const payment = row(await db.execute({
+      sql: 'SELECT * FROM payments WHERE id = ?',
+      args: [paymentId],
+    }));
+    if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
+
+    if (payment.status === 'confirmado') {
+      return res.status(409).json({
+        error: 'No se puede rechazar un pago ya confirmado. Se requiere un flujo de reversión.',
+        code: 'ALREADY_CONFIRMED',
+      });
+    }
+
+    const now = isoNow();
+    await db.execute({
+      sql: `UPDATE payments SET status = 'rechazado', confirmed_by = ?, confirmed_at = ?, rejection_reason = ?, updated_at = ? WHERE id = ?`,
+      args: [confirmed_by, now, String(reason).trim(), now, paymentId],
+    });
+
+    await insertPaymentEvent({
+      paymentId,
+      eventType: 'pago_rechazado',
+      previousStatus: payment.status,
+      newStatus: 'rechazado',
+      performedBy: confirmed_by,
+      notes: String(reason).trim(),
+    });
+
+    const updated = row(await db.execute({ sql: 'SELECT * FROM payments WHERE id = ?', args: [paymentId] }));
+    res.json({ payment: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/cash-handovers/:id/handover
+app.patch('/api/cash-handovers/:id/handover', async (req, res) => {
+  try {
+    const handoverId = Number(req.params.id);
+    const { handed_to } = req.body;
+
+    if (!VALID_HANDED_TO.includes(handed_to)) {
+      return res.status(400).json({ error: `handed_to inválido. Valores: ${VALID_HANDED_TO.join(', ')}` });
+    }
+
+    const handover = row(await db.execute({
+      sql: 'SELECT * FROM cash_handovers WHERE id = ?',
+      args: [handoverId],
+    }));
+    if (!handover) return res.status(404).json({ error: 'Rendición no encontrada' });
+
+    if (handover.status === 'entregado_administracion') {
+      return res.json({ cash_handover: handover, message: 'Ya registrada la entrega' });
+    }
+
+    if (handover.status !== 'en_poder_motorizado') {
+      return res.status(409).json({
+        error: `Transición inválida desde estado '${handover.status}'`,
+        code: 'INVALID_TRANSITION',
+      });
+    }
+
+    const now = isoNow();
+    await db.execute({
+      sql: `UPDATE cash_handovers
+            SET status = 'entregado_administracion', handed_to = ?, handed_by = 'admin', handed_at = ?, updated_at = ?
+            WHERE id = ?`,
+      args: [handed_to, now, now, handoverId],
+    });
+
+    await insertPaymentEvent({
+      paymentId: handover.payment_id,
+      cashHandoverId: handoverId,
+      eventType: 'efectivo_entregado_administracion',
+      previousStatus: 'en_poder_motorizado',
+      newStatus: 'entregado_administracion',
+      performedBy: 'admin',
+      notes: `Entregado a: ${handed_to}`,
+    });
+
+    const updated = row(await db.execute({ sql: 'SELECT * FROM cash_handovers WHERE id = ?', args: [handoverId] }));
+    res.json({ cash_handover: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/cash-handovers/:id/confirm
+app.patch('/api/cash-handovers/:id/confirm', async (req, res) => {
+  try {
+    const handoverId = Number(req.params.id);
+    const { confirmed_by } = req.body;
+
+    if (!VALID_HANDED_TO.includes(confirmed_by)) {
+      return res.status(400).json({ error: `confirmed_by inválido para rendición. Solo: ${VALID_HANDED_TO.join(', ')}` });
+    }
+
+    const handover = row(await db.execute({
+      sql: 'SELECT * FROM cash_handovers WHERE id = ?',
+      args: [handoverId],
+    }));
+    if (!handover) return res.status(404).json({ error: 'Rendición no encontrada' });
+
+    if (handover.status === 'confirmado') {
+      const payment = row(await db.execute({ sql: 'SELECT * FROM payments WHERE id = ?', args: [handover.payment_id] }));
+      return res.json({ cash_handover: handover, payment, message: 'Ya confirmado' });
+    }
+
+    if (handover.status !== 'entregado_administracion') {
+      return res.status(409).json({
+        error: `Solo se puede confirmar desde 'entregado_administracion'. Estado actual: '${handover.status}'`,
+        code: 'INVALID_TRANSITION',
+      });
+    }
+
+    const now = isoNow();
+
+    await db.execute({
+      sql: `UPDATE cash_handovers SET status = 'confirmado', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`,
+      args: [confirmed_by, now, now, handoverId],
+    });
+
+    await insertPaymentEvent({
+      paymentId: handover.payment_id,
+      cashHandoverId: handoverId,
+      eventType: 'efectivo_recibido_confirmado',
+      previousStatus: 'entregado_administracion',
+      newStatus: 'confirmado',
+      performedBy: confirmed_by,
+    });
+
+    const payment = row(await db.execute({ sql: 'SELECT * FROM payments WHERE id = ?', args: [handover.payment_id] }));
+
+    if (payment && payment.status !== 'confirmado') {
+      await db.execute({
+        sql: `UPDATE payments SET status = 'confirmado', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`,
+        args: [confirmed_by, now, now, payment.id],
+      });
+
+      await insertPaymentEvent({
+        paymentId: payment.id,
+        cashHandoverId: handoverId,
+        eventType: 'pago_confirmado',
+        previousStatus: payment.status,
+        newStatus: 'confirmado',
+        performedBy: confirmed_by,
+        notes: 'Confirmado al confirmar rendición de efectivo',
+      });
+    }
+
+    const updatedHandover = row(await db.execute({ sql: 'SELECT * FROM cash_handovers WHERE id = ?', args: [handoverId] }));
+    const updatedPayment  = row(await db.execute({ sql: 'SELECT * FROM payments WHERE id = ?', args: [handover.payment_id] }));
+    res.json({ cash_handover: updatedHandover, payment: updatedPayment });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/reports/payments-summary
+app.get('/api/reports/payments-summary', async (req, res) => {
+  try {
+    let { date } = req.query;
+    if (!date) {
+      // Default: today in Lima (UTC-5)
+      const d = new Date(Date.now() - 5 * 60 * 60 * 1000);
+      date = d.toISOString().slice(0, 10);
+    }
+
+    // Delivered orders for this date (Lima = UTC-5)
+    const deliveredOrders = rows(await db.execute({
+      sql: `SELECT o.id, o.total, o.rider_id, r.name as rider_name
+            FROM orders o
+            LEFT JOIN riders r ON o.rider_id = r.id
+            WHERE o.status = 'Entregado'
+              AND date(o.delivered_at, '-5 hours') = ?`,
+      args: [date],
+    }));
+
+    const orderIds      = deliveredOrders.map(o => o.id);
+    const totalVendido  = deliveredOrders.reduce((s, o) => s + (o.total || 0), 0);
+    const pedidosEntregados = deliveredOrders.length;
+
+    let payments = [];
+    if (orderIds.length > 0) {
+      const ph = orderIds.map(() => '?').join(',');
+      payments = rows(await db.execute({
+        sql: `SELECT p.*, ch.status as handover_status, ch.rider_id as handover_rider_id
+              FROM payments p
+              LEFT JOIN cash_handovers ch ON ch.payment_id = p.id
+              WHERE p.order_id IN (${ph})
+                AND p.status != 'rechazado'`,
+        args: orderIds,
+      }));
+    }
+
+    const pedidosSinPago    = orderIds.filter(id => !payments.find(p => p.order_id === id)).length;
+    const totalReportado    = payments.reduce((s, p) => s + (p.amount || 0), 0);
+    const totalConfirmado   = payments.filter(p => p.status === 'confirmado').reduce((s, p) => s + (p.amount || 0), 0);
+    const totalPorConfirmar = payments.filter(p => p.status === 'reportado').reduce((s, p) => s + (p.amount || 0), 0);
+
+    const sumBy  = (arr, field, val) => arr.filter(p => p[field] === val).reduce((s, p) => s + (p.amount || 0), 0);
+    const sumAll = (arr) => arr.reduce((s, p) => s + (p.amount || 0), 0);
+
+    const yape          = payments.filter(p => p.method === 'yape');
+    const efectivo      = payments.filter(p => p.method === 'efectivo');
+    const tarjeta       = payments.filter(p => p.method === 'tarjeta');
+    const transferencia = payments.filter(p => p.method === 'transferencia');
+
+    // Efectivo per-rider breakdown
+    const riderMap = {};
+    for (const o of deliveredOrders) {
+      if (o.rider_id && !riderMap[o.rider_id]) {
+        riderMap[o.rider_id] = { rider_id: o.rider_id, rider_name: o.rider_name, en_poder: 0, entregado: 0, confirmado: 0 };
+      }
+    }
+    for (const p of efectivo) {
+      const r = p.handover_rider_id;
+      if (r && riderMap[r]) {
+        if (p.handover_status === 'en_poder_motorizado')       riderMap[r].en_poder   += p.amount || 0;
+        else if (p.handover_status === 'entregado_administracion') riderMap[r].entregado += p.amount || 0;
+        else if (p.handover_status === 'confirmado')           riderMap[r].confirmado += p.amount || 0;
+      }
+    }
+
+    res.json({
+      date,
+      total_vendido:       totalVendido,
+      total_reportado:     totalReportado,
+      total_confirmado:    totalConfirmado,
+      total_por_confirmar: totalPorConfirmar,
+      pedidos_entregados:  pedidosEntregados,
+      pedidos_sin_pago:    pedidosSinPago,
+      por_metodo: {
+        yape: {
+          yape_luis:   sumBy(yape, 'destination', 'yape_luis'),
+          yape_gisela: sumBy(yape, 'destination', 'yape_gisela'),
+          total:       sumAll(yape),
+        },
+        efectivo: {
+          en_poder_motorizados:     sumBy(efectivo, 'handover_status', 'en_poder_motorizado'),
+          entregado_administracion: sumBy(efectivo, 'handover_status', 'entregado_administracion'),
+          confirmado:               sumBy(efectivo, 'handover_status', 'confirmado'),
+          total:                    sumAll(efectivo),
+        },
+        tarjeta: {
+          pos_lm: sumBy(tarjeta, 'destination', 'pos_lm'),
+          total:  sumAll(tarjeta),
+        },
+        transferencia: {
+          bcp_lm:    sumBy(transferencia, 'destination', 'bcp_lm'),
+          bcp_luis:  sumBy(transferencia, 'destination', 'bcp_luis'),
+          bcp_gisela: sumBy(transferencia, 'destination', 'bcp_gisela'),
+          bbva_lm:   sumBy(transferencia, 'destination', 'bbva_lm'),
+          otro:      sumBy(transferencia, 'destination', 'otro'),
+          total:     sumAll(transferencia),
+        },
+      },
+      efectivo_por_motorizado: Object.values(riderMap),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Local dev entry point
