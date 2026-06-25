@@ -44,15 +44,31 @@ export const payments = {
   summary:        (params)            => api.get('/reports/payments-summary', { params }).then(r => r.data),
 };
 
+export const catalog = {
+  list:           ()         => api.get('/catalog').then(r => r.data),
+  available:      ()         => api.get('/catalog/available').then(r => r.data),
+  createProduct:  (data)     => api.post('/catalog/products', data).then(r => r.data),
+  updateProduct:  (id, data) => api.put(`/catalog/products/${id}`, data).then(r => r.data),
+  createVariant:  (data)     => api.post('/catalog/variants', data).then(r => r.data),
+  updateVariant:  (id, data) => api.put(`/catalog/variants/${id}`, data).then(r => r.data),
+};
+
+export const inventory = {
+  stock:      ()       => api.get('/inventory/stock').then(r => r.data),
+  adjust:     (data)   => api.post('/inventory/adjust', data).then(r => r.data),
+  movements:  (params) => api.get('/inventory/movements', { params }).then(r => r.data),
+};
+
 export const reports = {
-  sales:     (params) => api.get('/reports/sales', { params }).then(r => r.data),
-  byZone:    (params) => api.get('/reports/by-zone', { params }).then(r => r.data),
-  byProduct: (params) => api.get('/reports/by-product', { params }).then(r => r.data),
-  byRider:   (params) => api.get('/reports/by-rider', { params }).then(r => r.data),
-  topClients:(params) => api.get('/reports/top-clients', { params }).then(r => r.data),
-  inactive:  (params) => api.get('/reports/inactive', { params }).then(r => r.data),
-  debts:     ()       => api.get('/reports/debts').then(r => r.data),
-  avgTicket: (params) => api.get('/reports/avg-ticket', { params }).then(r => r.data),
+  sales:       (params) => api.get('/reports/sales', { params }).then(r => r.data),
+  byZone:      (params) => api.get('/reports/by-zone', { params }).then(r => r.data),
+  byProduct:   (params) => api.get('/reports/by-product', { params }).then(r => r.data),
+  byRider:     (params) => api.get('/reports/by-rider', { params }).then(r => r.data),
+  topClients:  (params) => api.get('/reports/top-clients', { params }).then(r => r.data),
+  inactive:    (params) => api.get('/reports/inactive', { params }).then(r => r.data),
+  debts:       ()       => api.get('/reports/debts').then(r => r.data),
+  avgTicket:   (params) => api.get('/reports/avg-ticket', { params }).then(r => r.data),
+  dailyDetail: (params) => api.get('/reports/daily-detail', { params }).then(r => r.data),
   exportInactive: (days) => `/api/reports/export/inactive?days=${days}`,
 };
 

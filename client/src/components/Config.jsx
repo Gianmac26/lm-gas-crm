@@ -9,7 +9,7 @@ export default function Config() {
   const [form, setForm] = useState({
     pin: '', pin_confirm: '',
     daily_goal: '80',
-    price_10kg: '38', price_40kg: '120',
+    price_10kg: '38', price_45kg: '120',
     price_water: '12', price_cleaning: '15',
     zones: 'San Borja,Surco,Miraflores,Otra',
   });
@@ -21,7 +21,7 @@ export default function Config() {
       ...f,
       daily_goal:    c.daily_goal    || '80',
       price_10kg:    c.price_10kg    || '38',
-      price_40kg:    c.price_40kg    || '120',
+      price_45kg:    c.price_45kg    || c.price_40kg || '120',
       price_water:   c.price_water   || '12',
       price_cleaning:c.price_cleaning|| '15',
       zones:         c.zones         || 'San Borja,Surco,Miraflores,Otra',
@@ -38,7 +38,7 @@ export default function Config() {
       const payload = {
         daily_goal:     form.daily_goal,
         price_10kg:     form.price_10kg,
-        price_40kg:     form.price_40kg,
+        price_45kg:     form.price_45kg,
         price_water:    form.price_water,
         price_cleaning: form.price_cleaning,
         zones:          form.zones,
@@ -63,8 +63,8 @@ export default function Config() {
       <div className="card p-4 space-y-3">
         <h2 className="font-bold text-gray-800 dark:text-gray-200 text-base">💰 Precios (S/)</h2>
         {[
-          { key: 'price_10kg',     label: 'Balón 10 kg' },
-          { key: 'price_40kg',     label: 'Balón 40 kg' },
+          { key: 'price_10kg',     label: 'Balón 10 kg (default)' },
+          { key: 'price_45kg',     label: 'Balón 45 kg (Solgas)' },
           { key: 'price_water',    label: 'Agua bidón 20L' },
           { key: 'price_cleaning', label: 'Artículo limpieza (base)' },
         ].map(({ key, label }) => (

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, ShoppingBag, BarChart2, Settings, Truck, MessageSquare } from 'lucide-react';
+import { LayoutDashboard, Users, ShoppingBag, BarChart2, Settings, Truck, MessageSquare, Package } from 'lucide-react';
 
 const NAV = [
   { to: '/dashboard',     icon: LayoutDashboard, label: 'Inicio' },
@@ -8,6 +8,7 @@ const NAV = [
   { to: '/orders',        icon: ShoppingBag,     label: 'Pedidos' },
   { to: '/riders',        icon: Truck,           label: 'Moto' },
   { to: '/conversations', icon: MessageSquare,   label: 'Bandeja' },
+  { to: '/catalog',       icon: Package,         label: 'Catálogo' },
   { to: '/reports',       icon: BarChart2,       label: 'Reportes' },
   { to: '/config',        icon: Settings,        label: 'Config' },
 ];
@@ -23,6 +24,7 @@ export default function Layout() {
     if (loc.pathname.startsWith('/reports'))   return 'Reportes';
     if (loc.pathname.startsWith('/config'))         return 'Configuración';
     if (loc.pathname.startsWith('/conversations')) return 'Bandeja';
+    if (loc.pathname.startsWith('/catalog'))       return 'Catálogo';
     return 'L&M Gas';
   };
 
@@ -40,22 +42,22 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      {/* Bottom navigation */}
+      {/* Bottom navigation — scrollable so 8 items never overlap on any screen */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 pb-safe">
-        <div className="max-w-2xl mx-auto grid grid-cols-7 h-16">
+        <div className="max-w-2xl mx-auto h-16 flex overflow-x-auto scrollbar-none">
           {NAV.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
               to={to}
               className={({ isActive }) =>
-                `flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors touch-manipulation
+                `flex-shrink-0 flex-1 min-w-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors touch-manipulation select-none
                 ${isActive
                   ? 'text-orange-500 dark:text-orange-400'
                   : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`
               }
             >
-              <Icon size={22} strokeWidth={1.8} />
-              {label}
+              <Icon size={20} strokeWidth={1.8} />
+              <span className="leading-none">{label}</span>
             </NavLink>
           ))}
         </div>

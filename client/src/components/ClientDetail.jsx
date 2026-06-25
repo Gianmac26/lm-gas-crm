@@ -199,7 +199,7 @@ export default function ClientDetail() {
                 <div className="text-xs text-gray-400 mt-1.5">{fmtDate(o.created_at)}</div>
                 {o.items?.length > 0 && (
                   <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    {o.items.map(i => `${i.quantity}x ${i.product}`).join(' · ')}
+                    {o.items.map(i => `${i.quantity}x ${i.product_name_snapshot || i.product}`).join(' · ')}
                   </div>
                 )}
                 <div className="text-xs text-gray-400 mt-1">{o.payment_method} · {o.rider_name || 'Sin asignar'}</div>
