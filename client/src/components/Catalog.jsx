@@ -1,15 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { catalog as catalogApi } from '../api.js';
-import { Package, ChevronDown, ChevronRight, Edit, Check, X } from 'lucide-react';
+import { Package, ChevronDown, ChevronRight, Edit, Check, X, Plus } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const CATEGORY_LABELS = {
   'balón':    '🔥 Balón de gas',
-  'válvula':  '🔧 Válvulas',
-  'kit':      '📦 Kit',
-  'accesorio':'💧 Accesorios',
+  'kit':      '🔧 Kit de Válvula',
+  'accesorio':'💧 Productos',
   'otro':     'Otros',
 };
+
+// Order categories appear in, and which ones allow adding products inline
+// (key → default price suggested when adding a new product to that category).
+const CATEGORY_ORDER = ['balón', 'kit', 'accesorio', 'otro'];
+const ADDABLE = { 'kit': 65, 'accesorio': 0 };
 
 function isPending(item) {
   return !item.active || (item.sale_price == null || item.sale_price <= 0);
@@ -180,9 +184,68 @@ function ProductCard({ product, onUpdate }) {
   );
 }
 
+function AddProductForm({ category, defaultPrice, onCreated, onCancel }) {
+  const [name, setName]   = useState('');
+  const [price, setPrice] = useState(defaultPrice ? String(defaultPrice) : '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!name.trim()) return toast.error('Ingresa un nombre');
+    const p = parseFloat(price) || 0;
+    setSaving(true);
+    try {
+      await catalogApi.createProduct({
+        name: name.trim(),
+        category,
+        sale_price: p,
+        tracks_inventory: category === 'kit',
+        active: p > 0,
+      });
+      toast.success('Producto agregado');
+      onCreated();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Error al agregar');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="card p-3 space-y-2 border border-orange-200 dark:border-orange-800">
+      <input
+        className="input !py-2 text-sm"
+        placeholder="Nombre del producto"
+        value={name}
+        onChange={e => setName(e.target.value)}
+        autoFocus
+      />
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 flex-1">
+          <span className="text-gray-400 text-sm">S/</span>
+          <input
+            className="input !py-2 text-sm"
+            type="number" min="0" step="0.50"
+            placeholder="Precio"
+            value={price}
+            onChange={e => setPrice(e.target.value)}
+          />
+        </div>
+        <button onClick={save} disabled={saving}
+          className="px-3 py-2 rounded-xl bg-orange-500 text-white text-sm font-semibold disabled:opacity-50">
+          {saving ? '...' : 'Guardar'}
+        </button>
+        <button onClick={onCancel}
+          className="px-3 py-2 rounded-xl bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-sm font-medium">
+          Cancelar
+        </button>
+      </div>
+      <p className="text-xs text-gray-400">Se activa automáticamente si el precio es mayor que cero.</p>
+    </div>
+  );
+}
+
 export default function Catalog() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [addingCat, setAddingCat] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -201,6 +264,12 @@ export default function Catalog() {
     return acc;
   }, {});
 
+  // Show known categories in order (even addable ones with no products yet),
+  // then any other categories that happen to exist.
+  const knownCats = CATEGORY_ORDER.filter(c => grouped[c] || ADDABLE[c] !== undefined);
+  const extraCats = Object.keys(grouped).filter(c => !CATEGORY_ORDER.includes(c));
+  const catsToRender = [...knownCats, ...extraCats];
+
   return (
     <div className="p-4 space-y-6">
       <div className="flex items-center gap-3">
@@ -211,18 +280,43 @@ export default function Catalog() {
       {loading ? (
         <div className="flex items-center justify-center h-40 text-gray-400">Cargando...</div>
       ) : (
-        Object.entries(grouped).map(([cat, prods]) => (
-          <div key={cat}>
-            <h2 className="font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider mb-2">
-              {CATEGORY_LABELS[cat] || cat}
-            </h2>
-            <div className="space-y-2">
-              {prods.map(p => (
-                <ProductCard key={p.id} product={p} onUpdate={load} />
-              ))}
+        catsToRender.map(cat => {
+          const prods = grouped[cat] || [];
+          const canAdd = ADDABLE[cat] !== undefined;
+          return (
+            <div key={cat}>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
+                  {CATEGORY_LABELS[cat] || cat}
+                </h2>
+                {canAdd && (
+                  <button
+                    onClick={() => setAddingCat(addingCat === cat ? null : cat)}
+                    className="text-sm text-orange-500 font-semibold flex items-center gap-1"
+                  >
+                    <Plus size={16} /> Agregar
+                  </button>
+                )}
+              </div>
+              <div className="space-y-2">
+                {addingCat === cat && (
+                  <AddProductForm
+                    category={cat}
+                    defaultPrice={ADDABLE[cat]}
+                    onCreated={() => { setAddingCat(null); load(); }}
+                    onCancel={() => setAddingCat(null)}
+                  />
+                )}
+                {prods.map(p => (
+                  <ProductCard key={p.id} product={p} onUpdate={load} />
+                ))}
+                {prods.length === 0 && addingCat !== cat && (
+                  <p className="text-sm text-gray-400 py-2">Sin productos. Usa "Agregar" para crear uno.</p>
+                )}
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       )}
       <div className="h-4" />
     </div>

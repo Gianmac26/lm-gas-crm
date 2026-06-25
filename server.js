@@ -467,6 +467,37 @@ async function migrateCatalogSchema() {
   // ── Seed catalog only once ─────────────────────────────────────────────────
   const cnt = row(await db.execute({ sql: 'SELECT COUNT(*) as c FROM products', args: [] }));
   if (!cnt || cnt.c === 0) await seedCatalog();
+
+  // ── Reconcile catalog categories for installs seeded with the old layout ────
+  // (idempotent: only the first run touches rows; later runs are no-ops)
+  await reconcileCatalogCategories();
+}
+
+// Older installs seeded "válvula" as its own category plus a placeholder "Kit
+// completo de válvula". The product structure is now: Balón / Kit de válvula
+// (Válvula Normal + Premium) / Productos (accesorios). This moves legacy data
+// into that shape without clobbering user edits.
+async function reconcileCatalogCategories() {
+  const now = isoNow();
+  // 1. Válvula products now live under the "kit" category (Kit de válvula)
+  await db.execute({ sql: `UPDATE products SET category='kit', updated_at=? WHERE category='válvula'`, args: [now] });
+  // 2. Normalise legacy names
+  await db.execute({ sql: `UPDATE products SET name='Válvula Normal',  updated_at=? WHERE name='Válvula normal'`,  args: [now] });
+  await db.execute({ sql: `UPDATE products SET name='Válvula Premium', updated_at=? WHERE name='Válvula premium'`, args: [now] });
+  await db.execute({ sql: `UPDATE products SET name='Producto de limpieza', updated_at=? WHERE name='Artículo limpieza'`, args: [now] });
+  // 3. Drop the unused placeholder kit product (only if never used in an order)
+  const placeholder = row(await db.execute({
+    sql: `SELECT id FROM products WHERE name='Kit completo de válvula' LIMIT 1`, args: [],
+  }));
+  if (placeholder) {
+    const ref = row(await db.execute({
+      sql: `SELECT COUNT(*) as c FROM order_items WHERE product_id = ?`, args: [placeholder.id],
+    }));
+    if (!ref || ref.c === 0) {
+      await db.execute({ sql: `DELETE FROM product_variants WHERE product_id = ?`, args: [placeholder.id] });
+      await db.execute({ sql: `DELETE FROM products WHERE id = ?`, args: [placeholder.id] });
+    }
+  }
 }
 
 async function seedCatalog() {
@@ -495,11 +526,10 @@ async function seedCatalog() {
   };
 
   const balloonId = await insProduct('Balón de gas',          'balón',    0,    true,  true);
-                    await insProduct('Válvula premium',        'válvula',  65,   true,  true);
-                    await insProduct('Válvula normal',         'válvula',  65,   true,  true);
-                    await insProduct('Kit completo de válvula','kit',      0,    true,  false); // pending price
+                    await insProduct('Válvula Normal',         'kit',      65,   true,  true);
+                    await insProduct('Válvula Premium',        'kit',      65,   true,  true);
                     await insProduct('Agua bidón 20L',         'accesorio',pWat, false, true);
-                    await insProduct('Artículo limpieza',      'accesorio',pCln, false, true);
+                    await insProduct('Producto de limpieza',   'accesorio',pCln, false, true);
 
   // Balón 10 kg: all brands × both valve types → active, price = price_10kg
   for (const [brand, code] of [['Solgas','SOL'],['Flama Gas','FLA'],['Otra marca','OTR']]) {

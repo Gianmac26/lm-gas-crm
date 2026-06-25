@@ -8,7 +8,7 @@ const PAYMENT_METHODS = ['Efectivo', 'Yape', 'Plin', 'Fiado'];
 const STATUSES        = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
 
 // ── Legacy PRODUCTS list (fallback only) ──────────────────────────────────────
-const LEGACY_PRODUCTS = ['Balón 10kg', 'Balón 40kg', 'Agua bidón 20L', 'Artículo limpieza'];
+const LEGACY_PRODUCTS = ['Balón 10kg', 'Balón 40kg', 'Agua bidón 20L', 'Producto de limpieza'];
 
 function legacyPrice(product, prices) {
   if (product === 'Balón 10kg')    return parseFloat(prices?.price_10kg  || 38);
@@ -22,11 +22,21 @@ function emptyLegacyItem(prices) {
 }
 
 // ── Catalog item picker ───────────────────────────────────────────────────────
-const CAT_LABELS = { 'balón': 'Balón de gas', 'válvula': 'Válvula', 'kit': 'Kit', 'accesorio': 'Accesorio' };
+// Non-balón categories are shown as a single pill that reveals their product list.
+const SIMPLE_CATEGORIES = [
+  { key: 'kit',       label: 'Kit de válvula' },
+  { key: 'accesorio', label: 'Productos' },
+];
 
 function CatalogPicker({ available, onAdd, onClose }) {
   const balloonProduct = available.find(p => p.category === 'balón');
-  const otherProducts  = available.filter(p => p.category !== 'balón');
+
+  const productsByCat = {};
+  available.forEach(p => {
+    if (p.category === 'balón') return;
+    (productsByCat[p.category] = productsByCat[p.category] || []).push(p);
+  });
+  const simpleCats = SIMPLE_CATEGORIES.filter(c => (productsByCat[c.key] || []).length > 0);
 
   const [cat, setCat]   = useState(null);
   const [brand, setBrand]     = useState(null);
@@ -34,11 +44,12 @@ function CatalogPicker({ available, onAdd, onClose }) {
   const [valve, setValve]     = useState(null);
   const [selProduct, setSelProduct] = useState(null);
 
-  const resetBelow = (level) => {
-    if (level <= 'cat')   { setBrand(null); setPresKg(null); setValve(null); setSelProduct(null); }
-    if (level <= 'brand') { setPresKg(null); setValve(null); }
-    if (level <= 'pres')  { setValve(null); }
+  const selectCategory = (key) => {
+    setCat(key);
+    setBrand(null); setPresKg(null); setValve(null); setSelProduct(null);
   };
+  const selectBrand = (b)  => { setBrand(b); setPresKg(null); setValve(null); };
+  const selectPres  = (pk) => { setPresKg(pk); setValve(null); };
 
   const brands = balloonProduct
     ? [...new Set(balloonProduct.variants.map(v => v.brand))].filter(Boolean)
@@ -59,6 +70,8 @@ function CatalogPicker({ available, onAdd, onClose }) {
         (presKg !== 10 || v.valve_type === valve)
       )
     : null;
+
+  const catProducts = (cat && cat !== 'balón') ? (productsByCat[cat] || []) : [];
 
   const canAdd = cat === 'balón' ? Boolean(readyVariant)
     : Boolean(selProduct);
@@ -113,10 +126,9 @@ function CatalogPicker({ available, onAdd, onClose }) {
       <div>
         <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Categoría</p>
         <div className="flex flex-wrap gap-2">
-          {balloonProduct && <Pill label="Balón de gas" active={cat === 'balón'}   onClick={() => { setCat('balón'); resetBelow('cat'); }} />}
-          {otherProducts.map(p => (
-            <Pill key={p.id} label={CAT_LABELS[p.category] || p.name} active={selProduct?.id === p.id && cat !== 'balón'}
-              onClick={() => { setCat(p.category); setSelProduct(p); setBrand(null); setPresKg(null); setValve(null); }} />
+          {balloonProduct && <Pill label="Balón de gas" active={cat === 'balón'} onClick={() => selectCategory('balón')} />}
+          {simpleCats.map(c => (
+            <Pill key={c.key} label={c.label} active={cat === c.key} onClick={() => selectCategory(c.key)} />
           ))}
         </div>
       </div>
@@ -127,7 +139,7 @@ function CatalogPicker({ available, onAdd, onClose }) {
           <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Marca</p>
           <div className="flex flex-wrap gap-2">
             {brands.map(b => (
-              <Pill key={b} label={b} active={brand === b} onClick={() => { setBrand(b); resetBelow('brand'); }} />
+              <Pill key={b} label={b} active={brand === b} onClick={() => selectBrand(b)} />
             ))}
           </div>
         </div>
@@ -139,7 +151,7 @@ function CatalogPicker({ available, onAdd, onClose }) {
           <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Presentación</p>
           <div className="flex flex-wrap gap-2">
             {presentations.map(pk => (
-              <Pill key={pk} label={`${pk} kg`} active={presKg === pk} onClick={() => { setPresKg(pk); resetBelow('pres'); }} />
+              <Pill key={pk} label={`${pk} kg`} active={presKg === pk} onClick={() => selectPres(pk)} />
             ))}
           </div>
         </div>
@@ -152,6 +164,18 @@ function CatalogPicker({ available, onAdd, onClose }) {
           <div className="flex flex-wrap gap-2">
             {valveTypes.map(vt => (
               <Pill key={vt} label={`Válvula ${vt}`} active={valve === vt} onClick={() => setValve(vt)} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Product list (kit / productos) */}
+      {cat && cat !== 'balón' && catProducts.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Producto</p>
+          <div className="flex flex-wrap gap-2">
+            {catProducts.map(p => (
+              <Pill key={p.id} label={p.name} active={selProduct?.id === p.id} onClick={() => setSelProduct(p)} />
             ))}
           </div>
         </div>
@@ -201,7 +225,7 @@ function ItemRow({ item, index, isLegacy, prices, available, onSetItem, onRemove
         </button>
       </div>
       {/* Description for cleaning articles */}
-      {(item.category_snapshot === 'accesorio' || item.product === 'Artículo limpieza') && (
+      {(item.category_snapshot === 'accesorio' || item.product === 'Artículo limpieza' || item.product === 'Producto de limpieza') && (
         <input className="input !py-2" placeholder="Descripción del artículo"
           value={item.description || ''} onChange={e => onSetItem(index, 'description', e.target.value)} />
       )}
