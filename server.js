@@ -395,6 +395,20 @@ async function migrateCatalogSchema() {
     sql: `CREATE INDEX IF NOT EXISTS idx_inventory_stock_product ON inventory_stock(product_id)`,
     args: [],
   });
+  // H3: consolidate any pre-existing duplicate stock rows, then enforce uniqueness.
+  // COALESCE(variant_id, -1) lets the index treat NULL as -1 for equality (SQLite NULL != NULL in indexes).
+  await db.execute({
+    sql: `DELETE FROM inventory_stock WHERE id NOT IN (
+            SELECT MAX(id) FROM inventory_stock
+            GROUP BY product_id, stock_type, COALESCE(variant_id, -1)
+          )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_stock_unique
+          ON inventory_stock(product_id, stock_type, COALESCE(variant_id, -1))`,
+    args: [],
+  });
 
   await db.execute({
     sql: `CREATE TABLE IF NOT EXISTS inventory_movements (
@@ -1610,6 +1624,10 @@ function buildItemStmt(orderId, item) {
   };
 }
 
+// ─── ORDER / STATUS ENUMS ──────────────────────────────────────────────────────
+const ALLOWED_ORDER_STATUSES  = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
+const ORDER_PAYMENT_METHODS   = ['Efectivo', 'Yape', 'Plin', 'Transferencia', 'Tarjeta', 'Fiado'];
+
 // ─── CATALOG VARIANT RULES ─────────────────────────────────────────────────────
 const ALLOWED_VALVE_TYPES = ['normal', 'premium'];
 
@@ -1644,7 +1662,8 @@ function validateVariantRules(product, variantData) {
 // ─── ORDER ITEM VALIDATION & SNAPSHOT ENRICHMENT ──────────────────────────────
 // Validates items and (for catalog_version=1) enriches with server-side snapshots.
 // Throws { status, message } on validation failure.
-async function validateAndEnrichItems(items, catalogVersion) {
+// executor: db or an open transaction — reads happen through the same connection.
+async function validateAndEnrichItems(items, catalogVersion, executor = db) {
   const enriched = [];
   for (let idx = 0; idx < (items || []).length; idx++) {
     const item = items[idx];
@@ -1682,7 +1701,7 @@ async function validateAndEnrichItems(items, catalogVersion) {
     if (!item.product_id) {
       throw { status: 400, message: `${pos}: product_id requerido para pedidos con catalog_version=1` };
     }
-    const product = row(await db.execute({
+    const product = row(await executor.execute({
       sql: 'SELECT * FROM products WHERE id = ?',
       args: [item.product_id],
     }));
@@ -1697,7 +1716,7 @@ async function validateAndEnrichItems(items, catalogVersion) {
     let catalogPrice = product.sale_price || 0;
 
     if (item.variant_id) {
-      variant = row(await db.execute({
+      variant = row(await executor.execute({
         sql: 'SELECT * FROM product_variants WHERE id = ? AND product_id = ?',
         args: [item.variant_id, item.product_id],
       }));
@@ -1745,15 +1764,14 @@ app.post('/api/orders', async (req, res) => {
     const { client_id, rider_id, payment_method, notes, items, catalog_version } = req.body;
     const cv = catalog_version === 1 ? 1 : 0;
 
-    // Validate all items before touching the database (throws {status, message} on error)
-    const enriched = await validateAndEnrichItems(items, cv);
-    if (!enriched.length) return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
+    if (!items || !items.length) return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
 
-    const total = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-
-    // Atomic write: order + all items in a single transaction
+    // Open transaction first so catalog reads and writes share the same snapshot (M1: TOCTOU fix)
     const tx = await db.transaction('write');
     try {
+      const enriched = await validateAndEnrichItems(items, cv, tx);
+      const total = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+
       const r = await tx.execute({
         sql:  'INSERT INTO orders (client_id, rider_id, payment_method, notes, total, catalog_version) VALUES (?,?,?,?,?,?)',
         args: [client_id ?? null, rider_id ?? null, payment_method || 'Efectivo', notes ?? null, total, cv],
@@ -1762,7 +1780,7 @@ app.post('/api/orders', async (req, res) => {
       for (const item of enriched) {
         await tx.execute(buildItemStmt(orderId, item));
       }
-      if ((payment_method === 'Fiado') && client_id) {
+      if (payment_method === 'Fiado' && client_id) {
         await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [total, client_id] });
       }
       await tx.commit();
@@ -1784,42 +1802,50 @@ app.put('/api/orders/:id', async (req, res) => {
     const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [oid] }));
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
 
-    const newCv = req.body.catalog_version ?? existing.catalog_version ?? 0;
-
-    // If items are being replaced, validate ALL of them before any write
-    let enriched = null;
-    let newTotal  = existing.total;
-    if (items) {
-      enriched = await validateAndEnrichItems(items, newCv);
-      if (!enriched.length) return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
-      newTotal = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+    // H4: validate status enum
+    if (status !== undefined && !ALLOWED_ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Estado inválido. Permitidos: ${ALLOWED_ORDER_STATUSES.join(', ')}` });
     }
 
-    const deliveredAt = status === 'Entregado' && existing.status !== 'Entregado'
-      ? new Date().toISOString()
-      : existing.delivered_at;
+    if (items !== undefined && items !== null && !items.length) {
+      return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
+    }
 
-    // Atomic: update order + replace items in one transaction
+    const newCv             = req.body.catalog_version ?? existing.catalog_version ?? 0;
+    const newPaymentMethod  = payment_method ?? existing.payment_method;
+    const newStatus         = status         ?? existing.status;
+
+    // Atomic: catalog reads + all writes share the same transaction (M1: TOCTOU fix)
     const tx = await db.transaction('write');
     try {
+      let enriched = null;
+      let newTotal  = existing.total;
+      if (items) {
+        enriched = await validateAndEnrichItems(items, newCv, tx);
+        newTotal = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      }
+
+      const deliveredAt = newStatus === 'Entregado' && existing.status !== 'Entregado'
+        ? new Date().toISOString()
+        : existing.delivered_at;
+
+      // H2: compute debt delta from old vs new (Fiado total contribution)
+      const oldDebtContrib = existing.payment_method === 'Fiado' ? (existing.total || 0) : 0;
+      const newDebtContrib = newPaymentMethod         === 'Fiado' ? newTotal               : 0;
+      const debtDelta      = newDebtContrib - oldDebtContrib;
+
       await tx.execute({
         sql:  'UPDATE orders SET status=?, rider_id=?, payment_method=?, notes=?, total=?, delivered_at=?, catalog_version=? WHERE id=?',
-        args: [
-          status             ?? existing.status,
-          rider_id           ?? existing.rider_id,
-          payment_method     ?? existing.payment_method,
-          notes              ?? existing.notes,
-          newTotal,
-          deliveredAt,
-          newCv,
-          oid,
-        ],
+        args: [newStatus, rider_id ?? existing.rider_id, newPaymentMethod, notes ?? existing.notes, newTotal, deliveredAt, newCv, oid],
       });
       if (enriched) {
         await tx.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [oid] });
         for (const item of enriched) {
           await tx.execute(buildItemStmt(oid, item));
         }
+      }
+      if (debtDelta !== 0 && existing.client_id) {
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [debtDelta, existing.client_id] });
       }
       await tx.commit();
       res.json({ ok: true });
@@ -1836,18 +1862,69 @@ app.put('/api/orders/:id', async (req, res) => {
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
+
+    // H4: validate status enum
+    if (!ALLOWED_ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Estado inválido. Permitidos: ${ALLOWED_ORDER_STATUSES.join(', ')}` });
+    }
+
     const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [req.params.id] }));
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
+
     const deliveredAt = status === 'Entregado' ? new Date().toISOString() : existing.delivered_at;
-    await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+
+    // H2: reconcile Fiado debt on cancel / un-cancel
+    let debtDelta = 0;
+    if (existing.client_id && existing.payment_method === 'Fiado') {
+      if (status === 'Cancelado' && existing.status !== 'Cancelado') {
+        debtDelta = -(existing.total || 0);
+      } else if (existing.status === 'Cancelado' && status !== 'Cancelado') {
+        debtDelta = existing.total || 0;
+      }
+    }
+
+    if (debtDelta !== 0) {
+      const tx = await db.transaction('write');
+      try {
+        await tx.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [debtDelta, existing.client_id] });
+        await tx.commit();
+      } catch (txErr) { await tx.rollback(); throw txErr; }
+    } else {
+      await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+    }
+
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/orders/:id', async (req, res) => {
   try {
-    await db.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [req.params.id] });
-    await db.execute({ sql: 'DELETE FROM orders WHERE id = ?', args: [req.params.id] });
+    const oid = req.params.id;
+    const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [oid] }));
+    if (!existing) return res.status(404).json({ error: 'No encontrado' });
+
+    const tx = await db.transaction('write');
+    try {
+      // M5: remove payment audit trail before removing the order
+      await tx.execute({
+        sql: `DELETE FROM cash_handovers WHERE payment_id IN (SELECT id FROM payments WHERE order_id = ?)`,
+        args: [oid],
+      });
+      await tx.execute({
+        sql: `DELETE FROM payment_events WHERE payment_id IN (SELECT id FROM payments WHERE order_id = ?)`,
+        args: [oid],
+      });
+      await tx.execute({ sql: 'DELETE FROM payments WHERE order_id = ?', args: [oid] });
+      await tx.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [oid] });
+      await tx.execute({ sql: 'DELETE FROM orders WHERE id = ?', args: [oid] });
+      // H2: remove Fiado debt only if order was not already cancelled (cancelled orders already had debt removed)
+      if (existing.payment_method === 'Fiado' && existing.client_id && existing.status !== 'Cancelado') {
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [-(existing.total || 0), existing.client_id] });
+      }
+      await tx.commit();
+    } catch (txErr) { await tx.rollback(); throw txErr; }
+
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2320,37 +2397,34 @@ app.post('/api/inventory/adjust', async (req, res) => {
     const sType = stock_type || 'disponible';
     const now   = isoNow();
 
-    // Ensure stock row exists (find or create)
-    let stockRow = row(await db.execute({
-      sql: `SELECT * FROM inventory_stock WHERE product_id=? AND stock_type=? AND (variant_id IS ? OR variant_id=?)`,
-      args: [product_id, sType, vid, vid],
-    }));
-    if (!stockRow) {
-      await db.execute({
-        sql: `INSERT INTO inventory_stock (product_id, variant_id, stock_type, quantity, updated_at) VALUES (?,?,?,0,?)`,
+    // H3: fully atomic find-or-create inside a single transaction.
+    // INSERT OR IGNORE relies on idx_inventory_stock_unique (product_id, stock_type, COALESCE(variant_id,-1)).
+    const tx = await db.transaction('write');
+    try {
+      await tx.execute({
+        sql: `INSERT OR IGNORE INTO inventory_stock (product_id, variant_id, stock_type, quantity, updated_at)
+              VALUES (?, ?, ?, 0, ?)`,
         args: [product_id, vid, sType, now],
       });
-      stockRow = row(await db.execute({
+
+      const stockRow = row(await tx.execute({
         sql: `SELECT * FROM inventory_stock WHERE product_id=? AND stock_type=? AND (variant_id IS ? OR variant_id=?)`,
         args: [product_id, sType, vid, vid],
       }));
-    }
 
-    const stockBefore = stockRow.quantity;
-    const isOut       = OUT_MOVEMENT_TYPES.has(movement_type);
-    const delta       = isOut ? -qty : qty;
-    const stockAfter  = stockBefore + delta;
+      const stockBefore = stockRow.quantity;
+      const isOut       = OUT_MOVEMENT_TYPES.has(movement_type);
+      const delta       = isOut ? -qty : qty;
+      const stockAfter  = stockBefore + delta;
 
-    if (stockAfter < 0) {
-      return res.status(400).json({
-        error: `Operación rechazada: stock disponible es ${stockBefore} y la salida es ${qty} — el resultado sería negativo`,
-        stock_before: stockBefore,
-      });
-    }
+      if (stockAfter < 0) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: `Operación rechazada: stock disponible es ${stockBefore} y la salida es ${qty} — el resultado sería negativo`,
+          stock_before: stockBefore,
+        });
+      }
 
-    // ── Atomic: update stock + record movement ──────────────────────────────────
-    const tx = await db.transaction('write');
-    try {
       await tx.execute({
         sql: 'UPDATE inventory_stock SET quantity=?, updated_at=? WHERE id=?',
         args: [stockAfter, now, stockRow.id],
@@ -2372,10 +2446,17 @@ app.post('/api/inventory/adjust', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+const MAX_MOVEMENTS_LIMIT = 500;
+
 app.get('/api/inventory/movements', async (req, res) => {
   try {
     const { product_id, variant_id, from, to } = req.query;
-    const lim = parseInt(req.query.limit) || 100;
+    // M6: cap limit to prevent unbounded result sets
+    const rawLim = parseInt(req.query.limit) || 100;
+    if (rawLim > MAX_MOVEMENTS_LIMIT) {
+      return res.status(400).json({ error: `El parámetro limit no puede superar ${MAX_MOVEMENTS_LIMIT}` });
+    }
+    const lim = rawLim;
     let sql = `SELECT m.*, p.name as product_name, pv.brand, pv.presentation_kg, pv.valve_type
                FROM inventory_movements m
                JOIN products p ON m.product_id = p.id
@@ -2432,6 +2513,10 @@ app.get('/api/reports/daily-detail', async (req, res) => {
     const isValv = i => i.category_snapshot === 'válvula' || (pname(i).includes('válvula') && !isBalloon(i));
     const isKit  = i => i.category_snapshot === 'kit'     || pname(i).includes('kit');
 
+    // C2: counters use ONLY items from delivered orders to match revenue denominator
+    const deliveredIds    = new Set(delivered.map(o => o.id));
+    const deliveredItems  = itemList.filter(i => deliveredIds.has(i.order_id));
+
     // ── Summary counters ────────────────────────────────────────────────────────
     let b10 = 0, b45 = 0, b10n = 0, b10p = 0;
     const vn  = { quantity: 0, amount: 0 };
@@ -2440,7 +2525,7 @@ app.get('/api/reports/daily-detail', async (req, res) => {
     const oth = { quantity: 0, amount: 0 };
     const brandMap = {};
 
-    for (const i of itemList) {
+    for (const i of deliveredItems) {
       const qty = i.quantity || 0;
       const sub = i.subtotal || (qty * (i.unit_price || 0));
 
@@ -2481,19 +2566,21 @@ app.get('/api/reports/daily-detail', async (req, res) => {
       kits:          kts,
       otros_productos: oth,
       by_brand: Object.entries(brandMap).map(([brand, quantity]) => ({ brand, quantity })),
-      by_payment: Object.fromEntries(
-        ['Efectivo','Yape','Plin','Fiado'].map(pm => [
-          pm, delivered.filter(o => o.payment_method === pm).reduce((s, o) => s + (o.total || 0), 0),
-        ])
-      ),
+      // H5: dynamic — reflects whatever payment methods appear in delivered orders,
+      // no hardcoded list means no missing methods and no phantom Plin entries.
+      by_payment: delivered.reduce((acc, o) => {
+        const pm = o.payment_method || 'Sin método';
+        acc[pm] = (acc[pm] || 0) + (o.total || 0);
+        return acc;
+      }, {}),
       by_rider: Object.values(
         delivered.reduce((acc, o) => {
           const k = o.rider_name || 'Sin asignar';
           if (!acc[k]) acc[k] = { rider_name: k, orders: 0, revenue: 0, balloons: 0 };
           acc[k].orders++;
           acc[k].revenue  += o.total || 0;
-          acc[k].balloons += itemList.filter(i => i.order_id === o.id && isBalloon(i))
-                                     .reduce((s, i) => s + (i.quantity || 0), 0);
+          acc[k].balloons += deliveredItems.filter(i => i.order_id === o.id && isBalloon(i))
+                                           .reduce((s, i) => s + (i.quantity || 0), 0);
           return acc;
         }, {})
       ),
