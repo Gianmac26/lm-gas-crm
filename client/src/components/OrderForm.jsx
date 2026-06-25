@@ -4,7 +4,7 @@ import { orders as ordersApi, clients, riders, config, catalog as catalogApi } f
 import { ChevronLeft, Save, Plus, Trash2, Search, AlertTriangle, Info } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-const PAYMENT_METHODS = ['Efectivo', 'Yape', 'Plin', 'Fiado'];
+const PAYMENT_METHODS = ['Efectivo', 'Yape', 'Plin', 'Transferencias', 'T/C', 'Crédito'];
 const STATUSES        = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
 
 // ── Legacy PRODUCTS list (fallback only) ──────────────────────────────────────
@@ -489,19 +489,19 @@ export default function OrderForm() {
       <div className="card p-4 space-y-4">
         <div>
           <label className="label">Forma de pago</label>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             {PAYMENT_METHODS.map(m => (
               <button key={m} type="button"
                 onClick={() => setPayMethod(m)}
                 className={`py-2.5 rounded-xl text-sm font-medium transition-colors
                   ${payMethod === m
-                    ? (m === 'Fiado' ? 'bg-red-500 text-white' : 'bg-orange-500 text-white')
+                    ? (m === 'Crédito' ? 'bg-red-500 text-white' : 'bg-orange-500 text-white')
                     : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`}>
                 {m}
               </button>
             ))}
           </div>
-          {payMethod === 'Fiado' && (
+          {payMethod === 'Crédito' && (
             <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
               <AlertTriangle size={12} /> Se agregará S/ {total.toFixed(0)} a la deuda del cliente
             </p>

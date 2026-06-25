@@ -340,6 +340,13 @@ async function migratePaymentsSchema() {
     sql: `CREATE INDEX IF NOT EXISTS idx_payment_events_payment_id ON payment_events(payment_id)`,
     args: [],
   });
+
+  // "Fiado" fue renombrado a "Crédito" como forma de pago. Normaliza pedidos
+  // existentes para que el método se muestre consistente (idempotente).
+  await db.execute({
+    sql: `UPDATE orders SET payment_method = 'Crédito' WHERE payment_method = 'Fiado'`,
+    args: [],
+  });
 }
 
 async function migrateCatalogSchema() {
@@ -1656,7 +1663,11 @@ function buildItemStmt(orderId, item) {
 
 // ─── ORDER / STATUS ENUMS ──────────────────────────────────────────────────────
 const ALLOWED_ORDER_STATUSES  = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
-const ORDER_PAYMENT_METHODS   = ['Efectivo', 'Yape', 'Plin', 'Transferencia', 'Tarjeta', 'Fiado'];
+const ORDER_PAYMENT_METHODS   = ['Efectivo', 'Yape', 'Plin', 'Transferencias', 'T/C', 'Crédito'];
+
+// "Crédito" (antes "Fiado") es el método que suma a la deuda del cliente.
+// Se aceptan ambos para mantener compatibilidad con pedidos antiguos.
+function isCreditMethod(pm) { return pm === 'Crédito' || pm === 'Fiado'; }
 
 // ─── CATALOG VARIANT RULES ─────────────────────────────────────────────────────
 const ALLOWED_VALVE_TYPES = ['normal', 'premium'];
@@ -1810,7 +1821,7 @@ app.post('/api/orders', async (req, res) => {
       for (const item of enriched) {
         await tx.execute(buildItemStmt(orderId, item));
       }
-      if (payment_method === 'Fiado' && client_id) {
+      if (isCreditMethod(payment_method) && client_id) {
         await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [total, client_id] });
       }
       await tx.commit();
@@ -1859,9 +1870,9 @@ app.put('/api/orders/:id', async (req, res) => {
         ? new Date().toISOString()
         : existing.delivered_at;
 
-      // H2: compute debt delta from old vs new (Fiado total contribution)
-      const oldDebtContrib = existing.payment_method === 'Fiado' ? (existing.total || 0) : 0;
-      const newDebtContrib = newPaymentMethod         === 'Fiado' ? newTotal               : 0;
+      // H2: compute debt delta from old vs new (Crédito total contribution)
+      const oldDebtContrib = isCreditMethod(existing.payment_method) ? (existing.total || 0) : 0;
+      const newDebtContrib = isCreditMethod(newPaymentMethod)        ? newTotal               : 0;
       const debtDelta      = newDebtContrib - oldDebtContrib;
 
       await tx.execute({
@@ -1903,9 +1914,9 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 
     const deliveredAt = status === 'Entregado' ? new Date().toISOString() : existing.delivered_at;
 
-    // H2: reconcile Fiado debt on cancel / un-cancel
+    // H2: reconcile Crédito debt on cancel / un-cancel
     let debtDelta = 0;
-    if (existing.client_id && existing.payment_method === 'Fiado') {
+    if (existing.client_id && isCreditMethod(existing.payment_method)) {
       if (status === 'Cancelado' && existing.status !== 'Cancelado') {
         debtDelta = -(existing.total || 0);
       } else if (existing.status === 'Cancelado' && status !== 'Cancelado') {
@@ -1948,8 +1959,8 @@ app.delete('/api/orders/:id', async (req, res) => {
       await tx.execute({ sql: 'DELETE FROM payments WHERE order_id = ?', args: [oid] });
       await tx.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [oid] });
       await tx.execute({ sql: 'DELETE FROM orders WHERE id = ?', args: [oid] });
-      // H2: remove Fiado debt only if order was not already cancelled (cancelled orders already had debt removed)
-      if (existing.payment_method === 'Fiado' && existing.client_id && existing.status !== 'Cancelado') {
+      // H2: remove Crédito debt only if order was not already cancelled (cancelled orders already had debt removed)
+      if (isCreditMethod(existing.payment_method) && existing.client_id && existing.status !== 'Cancelado') {
         await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [-(existing.total || 0), existing.client_id] });
       }
       await tx.commit();
