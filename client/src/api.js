@@ -34,6 +34,16 @@ export const riders = {
   update: (id, data) => api.put(`/riders/${id}`, data).then(r => r.data),
 };
 
+export const payments = {
+  getByOrder:     (orderId)           => api.get(`/orders/${orderId}/payments`).then(r => r.data),
+  create:         (orderId, data)     => api.post(`/orders/${orderId}/payments`, data).then(r => r.data),
+  confirm:        (paymentId, data)   => api.patch(`/payments/${paymentId}/confirm`, data).then(r => r.data),
+  reject:         (paymentId, data)   => api.patch(`/payments/${paymentId}/reject`, data).then(r => r.data),
+  handoverCash:   (handoverId, data)  => api.patch(`/cash-handovers/${handoverId}/handover`, data).then(r => r.data),
+  confirmHandover:(handoverId, data)  => api.patch(`/cash-handovers/${handoverId}/confirm`, data).then(r => r.data),
+  summary:        (params)            => api.get('/reports/payments-summary', { params }).then(r => r.data),
+};
+
 export const reports = {
   sales:     (params) => api.get('/reports/sales', { params }).then(r => r.data),
   byZone:    (params) => api.get('/reports/by-zone', { params }).then(r => r.data),
