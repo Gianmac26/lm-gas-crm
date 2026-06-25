@@ -28,6 +28,9 @@ const SIMPLE_CATEGORIES = [
   { key: 'accesorio', label: 'Productos' },
 ];
 
+// Orden de marcas de balón en el selector.
+const BRAND_ORDER = ['Flama Gas', 'Solgas', 'Otros'];
+
 function CatalogPicker({ available, onAdd, onClose }) {
   const balloonProduct = available.find(p => p.category === 'balón');
 
@@ -40,34 +43,48 @@ function CatalogPicker({ available, onAdd, onClose }) {
 
   const [cat, setCat]   = useState(null);
   const [brand, setBrand]     = useState(null);
+  const [tipo, setTipo]       = useState(null);   // 'normal' | 'premium'
   const [presKg, setPresKg]   = useState(null);
-  const [valve, setValve]     = useState(null);
   const [selProduct, setSelProduct] = useState(null);
 
   const selectCategory = (key) => {
     setCat(key);
-    setBrand(null); setPresKg(null); setValve(null); setSelProduct(null);
+    setBrand(null); setTipo(null); setPresKg(null); setSelProduct(null);
   };
-  const selectBrand = (b)  => { setBrand(b); setPresKg(null); setValve(null); };
-  const selectPres  = (pk) => { setPresKg(pk); setValve(null); };
+  const selectBrand = (b)  => { setBrand(b); setTipo(null); setPresKg(null); };
+  const selectTipo  = (t)  => { setTipo(t); setPresKg(null); };
+  const selectPres  = (pk) => { setPresKg(pk); };
 
-  const brands = balloonProduct
-    ? [...new Set(balloonProduct.variants.map(v => v.brand))].filter(Boolean)
+  const balloonVariants = balloonProduct ? balloonProduct.variants : [];
+
+  // Marcas ordenadas: Flama Gas, Solgas, Otros, luego cualquier otra.
+  const brands = [...new Set(balloonVariants.map(v => v.brand))].filter(Boolean)
+    .sort((a, b) => {
+      const ia = BRAND_ORDER.indexOf(a), ib = BRAND_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+
+  // Tipo de balón (normal/premium) disponible para la marca elegida.
+  // El balón de 45 kg no tiene válvula (valve_type null) → cuenta como "normal".
+  const brandVariants = brand ? balloonVariants.filter(v => v.brand === brand) : [];
+  const tipos = [];
+  if (brandVariants.some(v => v.valve_type === 'normal' || v.valve_type == null)) tipos.push('normal');
+  if (brandVariants.some(v => v.valve_type === 'premium')) tipos.push('premium');
+
+  // Presentaciones según el tipo: premium solo 10 kg; normal incluye 45 kg.
+  const tipoMatches = (v) => tipo === 'premium'
+    ? v.valve_type === 'premium'
+    : (v.valve_type === 'normal' || v.valve_type == null);
+  const presentations = (brand && tipo)
+    ? [...new Set(brandVariants.filter(tipoMatches).map(v => v.presentation_kg))]
+        .filter(Boolean).sort((a, b) => a - b)
     : [];
 
-  const presentations = (balloonProduct && brand)
-    ? [...new Set(balloonProduct.variants.filter(v => v.brand === brand).map(v => v.presentation_kg))].filter(Boolean)
-    : [];
-
-  const valveTypes = (balloonProduct && brand && presKg === 10)
-    ? [...new Set(balloonProduct.variants.filter(v => v.brand === brand && v.presentation_kg === presKg).map(v => v.valve_type))].filter(Boolean)
-    : [];
-
-  const readyVariant = (balloonProduct && brand && presKg)
-    ? balloonProduct.variants.find(v =>
+  const readyVariant = (brand && tipo && presKg)
+    ? balloonVariants.find(v =>
         v.brand === brand &&
         v.presentation_kg === presKg &&
-        (presKg !== 10 || v.valve_type === valve)
+        (presKg === 45 ? v.valve_type == null : v.valve_type === tipo)
       )
     : null;
 
@@ -82,11 +99,11 @@ function CatalogPicker({ available, onAdd, onClose }) {
       onAdd({
         product_id:            balloonProduct.id,
         variant_id:            readyVariant.id,
-        product_name_snapshot: [brand, presKg ? `${presKg} kg` : null, valve ? `válvula ${valve}` : null].filter(Boolean).join(' · '),
+        product_name_snapshot: [brand, presKg ? `${presKg} kg` : null, tipo].filter(Boolean).join(' · '),
         category_snapshot:     'balón',
         brand_snapshot:        brand,
         presentation_snapshot: presKg ? `${presKg} kg` : null,
-        valve_type_snapshot:   valve || null,
+        valve_type_snapshot:   readyVariant.valve_type || null,
         catalog_unit_price:    readyVariant.sale_price,
         unit_price:            readyVariant.sale_price,
         quantity:              1,
@@ -145,25 +162,25 @@ function CatalogPicker({ available, onAdd, onClose }) {
         </div>
       )}
 
-      {/* Presentation (balón only) */}
-      {cat === 'balón' && brand && presentations.length > 0 && (
+      {/* Tipo (balón only): Normal / Premium */}
+      {cat === 'balón' && brand && tipos.length > 0 && (
         <div>
-          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Presentación</p>
+          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Tipo</p>
           <div className="flex flex-wrap gap-2">
-            {presentations.map(pk => (
-              <Pill key={pk} label={`${pk} kg`} active={presKg === pk} onClick={() => selectPres(pk)} />
+            {tipos.map(t => (
+              <Pill key={t} label={t === 'premium' ? 'Premium' : 'Normal'} active={tipo === t} onClick={() => selectTipo(t)} />
             ))}
           </div>
         </div>
       )}
 
-      {/* Valve type (10 kg only) */}
-      {cat === 'balón' && brand && presKg === 10 && valveTypes.length > 0 && (
+      {/* Presentation (balón only) */}
+      {cat === 'balón' && brand && tipo && presentations.length > 0 && (
         <div>
-          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Tipo de válvula</p>
+          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">Presentación</p>
           <div className="flex flex-wrap gap-2">
-            {valveTypes.map(vt => (
-              <Pill key={vt} label={`Válvula ${vt}`} active={valve === vt} onClick={() => setValve(vt)} />
+            {presentations.map(pk => (
+              <Pill key={pk} label={`${pk} kg`} active={presKg === pk} onClick={() => selectPres(pk)} />
             ))}
           </div>
         </div>
@@ -185,7 +202,7 @@ function CatalogPicker({ available, onAdd, onClose }) {
       {readyVariant && (
         <div className="bg-white dark:bg-gray-800 rounded-lg px-3 py-2 text-sm flex items-center justify-between">
           <span className="text-gray-700 dark:text-gray-300">
-            {[brand, presKg ? `${presKg} kg` : null, valve ? `válvula ${valve}` : null].filter(Boolean).join(' · ')}
+            {[brand, presKg ? `${presKg} kg` : null, tipo].filter(Boolean).join(' · ')}
           </span>
           <span className="font-bold text-orange-500">S/ {readyVariant.sale_price}</span>
         </div>

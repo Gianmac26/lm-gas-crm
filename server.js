@@ -505,6 +505,26 @@ async function reconcileCatalogCategories() {
       await db.execute({ sql: `DELETE FROM products WHERE id = ?`, args: [placeholder.id] });
     }
   }
+
+  // 4. Renombrar la marca "Otra marca" → "Otros" (variantes e historial de pedidos)
+  await db.execute({ sql: `UPDATE product_variants SET brand='Otros', updated_at=? WHERE brand='Otra marca'`, args: [now] });
+  await db.execute({ sql: `UPDATE order_items SET brand_snapshot='Otros' WHERE brand_snapshot='Otra marca'`, args: [] });
+  await db.execute({ sql: `UPDATE order_items SET product_name_snapshot=REPLACE(product_name_snapshot,'Otra marca','Otros') WHERE product_name_snapshot LIKE '%Otra marca%'`, args: [] });
+
+  // 5. (Una sola vez) activar el balón de 45 kg en todas las marcas al precio
+  //    configurado, para que cada marca ofrezca 10 kg y 45 kg. El dueño puede
+  //    ajustar precios o desactivar variantes después en el Catálogo.
+  const flag = row(await db.execute({ sql: `SELECT value FROM config WHERE key='catalog_45kg_activated'`, args: [] }));
+  if (!flag) {
+    const cfg = await getConfig();
+    const p45 = parseFloat(cfg.price_45kg || cfg.price_40kg || '120');
+    await db.execute({
+      sql: `UPDATE product_variants SET sale_price=?, active=1, updated_at=?
+            WHERE presentation_kg=45 AND (sale_price IS NULL OR sale_price<=0)`,
+      args: [p45, now],
+    });
+    await db.execute({ sql: `INSERT OR IGNORE INTO config (key, value) VALUES ('catalog_45kg_activated','1')`, args: [] });
+  }
 }
 
 async function seedCatalog() {
@@ -538,16 +558,13 @@ async function seedCatalog() {
                     await insProduct('Agua bidón 20L',         'accesorio',pWat, false, true);
                     await insProduct('Producto de limpieza',   'accesorio',pCln, false, true);
 
-  // Balón 10 kg: all brands × both valve types → active, price = price_10kg
-  for (const [brand, code] of [['Solgas','SOL'],['Flama Gas','FLA'],['Otra marca','OTR']]) {
-    await insVariant(balloonId, brand, 10, 'normal',  p10, true,  `LM-${code}-10-N`);
-    await insVariant(balloonId, brand, 10, 'premium', p10, true,  `LM-${code}-10-P`);
+  // Balón 10 kg: cada marca × normal/premium → activo, precio = price_10kg
+  // Balón 45 kg: cada marca (sin válvula) → activo, precio = price_45kg
+  for (const [brand, code] of [['Flama Gas','FLA'],['Solgas','SOL'],['Otros','OTR']]) {
+    await insVariant(balloonId, brand, 10, 'normal',  p10, true, `LM-${code}-10-N`);
+    await insVariant(balloonId, brand, 10, 'premium', p10, true, `LM-${code}-10-P`);
+    await insVariant(balloonId, brand, 45, null,      p45, true, `LM-${code}-45`);
   }
-
-  // Balón 45 kg: Solgas active (takes legacy price_40kg), others pending
-  await insVariant(balloonId, 'Solgas',    45, null, p45, true,  'LM-SOL-45');
-  await insVariant(balloonId, 'Flama Gas', 45, null, 0,   false, 'LM-FLA-45');
-  await insVariant(balloonId, 'Otra marca',45, null, 0,   false, 'LM-OTR-45');
 }
 
 async function backfillClientPhones() {
@@ -1588,10 +1605,38 @@ app.put('/api/clients/:id', async (req, res) => {
 });
 
 app.delete('/api/clients/:id', async (req, res) => {
+  const cid = req.params.id;
+  const tx = await db.transaction('write');
   try {
-    await db.execute({ sql: 'DELETE FROM clients WHERE id = ?', args: [req.params.id] });
+    // Borrado en cascada: pedidos del cliente y todo lo que cuelga de ellos
+    const orderIds = rows(await tx.execute({
+      sql: 'SELECT id FROM orders WHERE client_id = ?', args: [cid],
+    })).map(o => o.id);
+
+    if (orderIds.length) {
+      const ph = orderIds.map(() => '?').join(',');
+      await tx.execute({ sql: `DELETE FROM cash_handovers WHERE payment_id IN (SELECT id FROM payments WHERE order_id IN (${ph}))`, args: orderIds });
+      await tx.execute({ sql: `DELETE FROM payment_events  WHERE payment_id IN (SELECT id FROM payments WHERE order_id IN (${ph}))`, args: orderIds });
+      await tx.execute({ sql: `DELETE FROM payments    WHERE order_id IN (${ph})`, args: orderIds });
+      await tx.execute({ sql: `DELETE FROM order_items WHERE order_id IN (${ph})`, args: orderIds });
+      await tx.execute({ sql: `DELETE FROM orders      WHERE id       IN (${ph})`, args: orderIds });
+    }
+
+    // Conversaciones y mensajes de WhatsApp del cliente
+    await tx.execute({
+      sql: `DELETE FROM wa_messages WHERE client_id = ?
+              OR conversation_id IN (SELECT id FROM wa_conversations WHERE client_id = ?)`,
+      args: [cid, cid],
+    });
+    await tx.execute({ sql: 'DELETE FROM wa_conversations WHERE client_id = ?', args: [cid] });
+
+    await tx.execute({ sql: 'DELETE FROM clients WHERE id = ?', args: [cid] });
+    await tx.commit();
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await tx.rollback();
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────

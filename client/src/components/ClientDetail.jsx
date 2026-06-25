@@ -48,10 +48,14 @@ export default function ClientDetail() {
   }, [id]);
 
   const handleDelete = async () => {
-    if (!confirm(`¿Eliminar a ${client.name}? Esta acción no se puede deshacer.`)) return;
-    await clients.delete(id);
-    toast.success('Cliente eliminado');
-    nav('/clients');
+    if (!confirm(`¿Eliminar a ${client.name}? Se borrará también todo su historial (pedidos, pagos y conversaciones). Esta acción no se puede deshacer.`)) return;
+    try {
+      await clients.delete(id);
+      toast.success('Cliente eliminado');
+      nav('/clients');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'No se pudo eliminar el cliente');
+    }
   };
 
   if (loading) return <div className="flex items-center justify-center h-64"><div className="animate-spin text-4xl">🔥</div></div>;
