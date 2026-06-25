@@ -32,6 +32,9 @@ export default function Reports() {
   const [debts, setDebts]       = useState([]);
   const [avgTicket, setAvgTicket] = useState({});
   const [loading, setLoading]   = useState(false);
+  const [dailyDate, setDailyDate] = useState(() => new Date().toISOString().slice(0,10));
+  const [dailyData, setDailyData] = useState(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
 
   const range = dateRange(PERIODS[period].from, PERIODS[period].to);
 
@@ -57,6 +60,17 @@ export default function Reports() {
 
   useEffect(() => { loadAll(); }, [period, inactiveDays]);
 
+  const loadDaily = async (date) => {
+    setDailyLoading(true);
+    try {
+      const data = await reports.dailyDetail({ date });
+      setDailyData(data);
+    } catch { toast.error('Error cargando reporte diario'); }
+    finally { setDailyLoading(false); }
+  };
+
+  useEffect(() => { if (tab === 'diario') loadDaily(dailyDate); }, [tab, dailyDate]);
+
   const totalRevenue  = sales.reduce((s, d) => s + d.revenue, 0);
   const totalBalloons = sales.reduce((s, d) => s + d.balloons_10 + d.balloons_40, 0);
   const totalOrders   = sales.reduce((s, d) => s + d.orders, 0);
@@ -67,6 +81,7 @@ export default function Reports() {
   };
 
   const TABS = [
+    { id: 'diario',    label: 'Diario',    icon: TrendingUp },
     { id: 'ventas',    label: 'Ventas',    icon: TrendingUp },
     { id: 'zonas',     label: 'Zonas',     icon: MapPin },
     { id: 'productos', label: 'Productos', icon: Package },
@@ -119,6 +134,192 @@ export default function Reports() {
         <div className="card h-40 animate-pulse bg-gray-100 dark:bg-gray-800" />
       ) : (
         <>
+          {/* DIARIO */}
+          {tab === 'diario' && (
+            <div className="space-y-3">
+              <input
+                type="date" className="input"
+                value={dailyDate}
+                onChange={e => setDailyDate(e.target.value)}
+              />
+              {dailyLoading ? (
+                <div className="card h-40 animate-pulse bg-gray-100 dark:bg-gray-800" />
+              ) : dailyData ? (
+                <>
+                  {/* Summary */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="card p-3 text-center">
+                      <div className="text-2xl font-bold text-orange-500">{fmt(dailyData.summary.revenue)}</div>
+                      <div className="text-xs text-gray-500">Ingresos</div>
+                    </div>
+                    <div className="card p-3 text-center">
+                      <div className="text-2xl font-bold text-blue-700 dark:text-blue-400">
+                        {dailyData.summary.balloons_10 + dailyData.summary.balloons_45}
+                      </div>
+                      <div className="text-xs text-gray-500">Balones entregados</div>
+                    </div>
+                    <div className="card p-3 text-center">
+                      <div className="text-xl font-bold text-green-600">{dailyData.summary.delivered}</div>
+                      <div className="text-xs text-gray-500">Entregados</div>
+                    </div>
+                    <div className="card p-3 text-center">
+                      <div className="text-xl font-bold text-yellow-600">{dailyData.summary.pending + dailyData.summary.in_transit}</div>
+                      <div className="text-xs text-gray-500">Pendientes</div>
+                    </div>
+                  </div>
+
+                  {/* By payment */}
+                  <div className="card p-4">
+                    <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm mb-2">Por forma de pago</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(dailyData.summary.by_payment).map(([pm, rev]) => (
+                        <div key={pm} className="flex justify-between text-sm">
+                          <span className="text-gray-500">{pm}</span>
+                          <span className="font-semibold text-gray-800 dark:text-gray-200">{fmt(rev)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* By rider */}
+                  {dailyData.summary.by_rider.length > 0 && (
+                    <div className="card p-4">
+                      <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm mb-2">Por motorizado</h4>
+                      <div className="space-y-2">
+                        {dailyData.summary.by_rider.map((r, i) => (
+                          <div key={i} className="flex items-center justify-between text-sm">
+                            <div>
+                              <span className="font-semibold text-gray-800 dark:text-gray-200">{r.rider_name}</span>
+                              <span className="text-gray-400 text-xs ml-2">{r.orders} pedidos · {r.balloons} balones</span>
+                            </div>
+                            <span className="font-bold text-orange-500">{fmt(r.revenue)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Balloon detail */}
+                  <div className="card p-4">
+                    <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm mb-2">Detalle balones</h4>
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-500">10 kg (total)</span>
+                        <span className="font-semibold text-gray-800 dark:text-gray-200">{dailyData.summary.balloons_10}</span>
+                      </div>
+                      {(dailyData.summary.balloons_10_normal > 0 || dailyData.summary.balloons_10_premium > 0) && (
+                        <>
+                          <div className="flex justify-between text-xs pl-3">
+                            <span className="text-gray-400">└ válvula normal</span>
+                            <span className="text-gray-600 dark:text-gray-400">{dailyData.summary.balloons_10_normal}</span>
+                          </div>
+                          <div className="flex justify-between text-xs pl-3">
+                            <span className="text-gray-400">└ válvula premium</span>
+                            <span className="text-gray-600 dark:text-gray-400">{dailyData.summary.balloons_10_premium}</span>
+                          </div>
+                        </>
+                      )}
+                      <div className="flex justify-between text-sm mt-1">
+                        <span className="text-gray-500">45 kg</span>
+                        <span className="font-semibold text-gray-800 dark:text-gray-200">{dailyData.summary.balloons_45}</span>
+                      </div>
+                    </div>
+                    {dailyData.summary.by_brand?.length > 0 && (
+                      <div className="mt-3 pt-2 border-t border-gray-100 dark:border-gray-700">
+                        <p className="text-xs text-gray-400 mb-1">Por marca</p>
+                        <div className="space-y-1">
+                          {dailyData.summary.by_brand.map(b => (
+                            <div key={b.brand} className="flex justify-between text-xs">
+                              <span className="text-gray-500">{b.brand}</span>
+                              <span className="font-medium text-gray-700 dark:text-gray-300">{b.quantity}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Otros productos */}
+                  {(dailyData.summary.valvulas_normal_individuales?.quantity > 0 ||
+                    dailyData.summary.valvulas_premium_individuales?.quantity > 0 ||
+                    dailyData.summary.kits?.quantity > 0 ||
+                    dailyData.summary.otros_productos?.quantity > 0) && (
+                    <div className="card p-4">
+                      <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm mb-2">Otros productos</h4>
+                      <div className="space-y-1">
+                        {dailyData.summary.valvulas_normal_individuales?.quantity > 0 && (
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-500">Válvulas normal</span>
+                            <span className="font-semibold text-gray-800 dark:text-gray-200">
+                              {dailyData.summary.valvulas_normal_individuales.quantity} · {fmt(dailyData.summary.valvulas_normal_individuales.amount)}
+                            </span>
+                          </div>
+                        )}
+                        {dailyData.summary.valvulas_premium_individuales?.quantity > 0 && (
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-500">Válvulas premium</span>
+                            <span className="font-semibold text-gray-800 dark:text-gray-200">
+                              {dailyData.summary.valvulas_premium_individuales.quantity} · {fmt(dailyData.summary.valvulas_premium_individuales.amount)}
+                            </span>
+                          </div>
+                        )}
+                        {dailyData.summary.kits?.quantity > 0 && (
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-500">Kits completos</span>
+                            <span className="font-semibold text-gray-800 dark:text-gray-200">
+                              {dailyData.summary.kits.quantity} · {fmt(dailyData.summary.kits.amount)}
+                            </span>
+                          </div>
+                        )}
+                        {dailyData.summary.otros_productos?.quantity > 0 && (
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-500">Accesorios / otros</span>
+                            <span className="font-semibold text-gray-800 dark:text-gray-200">
+                              {dailyData.summary.otros_productos.quantity} · {fmt(dailyData.summary.otros_productos.amount)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Orders list */}
+                  <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm">Pedidos del día ({dailyData.orders.length})</h4>
+                  {dailyData.orders.map(o => (
+                    <div key={o.id} className="card p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-gray-900 dark:text-white text-sm">{o.client_name || '—'}</span>
+                        <span className="font-bold text-orange-500">{fmt(o.total)}</span>
+                      </div>
+                      <div className="text-xs text-gray-400 mt-1">
+                        {o.status} · {o.payment_method}
+                        {o.payment_destination ? ` → ${o.payment_destination}` : ''}
+                        {' · '}{o.rider_name || 'Sin asignar'}
+                      </div>
+                      {o.reconciliation_status && o.reconciliation_status !== 'sin_registrar' && (
+                        <div className="text-xs mt-0.5">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium
+                            ${o.reconciliation_status === 'confirmado'
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : o.reconciliation_status === 'rechazado'
+                              ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                              : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'}`}>
+                            {o.reconciliation_status}
+                          </span>
+                        </div>
+                      )}
+                      {o.items?.length > 0 && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {o.items.map(i => `${i.quantity}× ${i.product_name_snapshot || i.product}`).join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </>
+              ) : null}
+            </div>
+          )}
+
           {/* VENTAS */}
           {tab === 'ventas' && (
             <div className="space-y-2">

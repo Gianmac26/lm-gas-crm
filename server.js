@@ -117,6 +117,7 @@ async function initDb() {
 
   await migrateWhatsappSchema();
   await migratePaymentsSchema();
+  await migrateCatalogSchema();
 
   const defaults = {
     pin: '1234', daily_goal: '80', price_10kg: '38', price_40kg: '120',
@@ -339,6 +340,207 @@ async function migratePaymentsSchema() {
     sql: `CREATE INDEX IF NOT EXISTS idx_payment_events_payment_id ON payment_events(payment_id)`,
     args: [],
   });
+}
+
+async function migrateCatalogSchema() {
+  // ── New tables ─────────────────────────────────────────────────────────────
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS products (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL,
+      category         TEXT NOT NULL DEFAULT 'otro',
+      description      TEXT,
+      sku              TEXT UNIQUE,
+      sale_price       REAL DEFAULT 0,
+      unit             TEXT DEFAULT 'unidad',
+      tracks_inventory INTEGER DEFAULT 0,
+      active           INTEGER DEFAULT 1,
+      created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    args: [],
+  });
+
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS product_variants (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id       INTEGER NOT NULL,
+      brand            TEXT,
+      presentation_kg  REAL,
+      valve_type       TEXT,
+      sku              TEXT UNIQUE,
+      sale_price       REAL,
+      active           INTEGER DEFAULT 1,
+      created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    )`,
+    args: [],
+  });
+
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS inventory_stock (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id  INTEGER NOT NULL,
+      variant_id  INTEGER,
+      stock_type  TEXT NOT NULL DEFAULT 'disponible',
+      quantity    INTEGER DEFAULT 0,
+      updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id),
+      FOREIGN KEY (variant_id) REFERENCES product_variants(id)
+    )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE INDEX IF NOT EXISTS idx_inventory_stock_product ON inventory_stock(product_id)`,
+    args: [],
+  });
+  // H3: consolidate any pre-existing duplicate stock rows, then enforce uniqueness.
+  // COALESCE(variant_id, -1) lets the index treat NULL as -1 for equality (SQLite NULL != NULL in indexes).
+  await db.execute({
+    sql: `DELETE FROM inventory_stock WHERE id NOT IN (
+            SELECT MAX(id) FROM inventory_stock
+            GROUP BY product_id, stock_type, COALESCE(variant_id, -1)
+          )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_stock_unique
+          ON inventory_stock(product_id, stock_type, COALESCE(variant_id, -1))`,
+    args: [],
+  });
+
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS inventory_movements (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id     INTEGER NOT NULL,
+      variant_id     INTEGER,
+      movement_type  TEXT NOT NULL,
+      quantity       INTEGER NOT NULL,
+      stock_before   INTEGER,
+      stock_after    INTEGER,
+      order_id       INTEGER,
+      rider_id       INTEGER,
+      performed_by   TEXT,
+      notes          TEXT,
+      created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE INDEX IF NOT EXISTS idx_inventory_movements_product ON inventory_movements(product_id)`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE INDEX IF NOT EXISTS idx_inventory_movements_variant ON inventory_movements(variant_id)`,
+    args: [],
+  });
+
+  // ── Extend existing tables ─────────────────────────────────────────────────
+  await ensureColumn('orders', 'catalog_version', 'INTEGER DEFAULT 0');
+
+  for (const [col, def] of [
+    ['product_id',            'INTEGER'],
+    ['variant_id',            'INTEGER'],
+    ['product_name_snapshot', 'TEXT'],
+    ['category_snapshot',     'TEXT'],
+    ['brand_snapshot',        'TEXT'],
+    ['presentation_snapshot', 'TEXT'],
+    ['valve_type_snapshot',   'TEXT'],
+    ['catalog_unit_price',    'REAL'],
+  ]) {
+    await ensureColumn('order_items', col, def);
+  }
+
+  // ── price_45kg in config (legacy price_40kg was the 45 kg price) ──────────
+  await db.execute({
+    sql: `INSERT OR IGNORE INTO config (key, value)
+          SELECT 'price_45kg', value FROM config WHERE key = 'price_40kg'`,
+    args: [],
+  });
+  await db.execute({
+    sql: `INSERT OR IGNORE INTO config (key, value) VALUES ('price_45kg', '120')`,
+    args: [],
+  });
+
+  // ── Seed catalog only once ─────────────────────────────────────────────────
+  const cnt = row(await db.execute({ sql: 'SELECT COUNT(*) as c FROM products', args: [] }));
+  if (!cnt || cnt.c === 0) await seedCatalog();
+
+  // ── Reconcile catalog categories for installs seeded with the old layout ────
+  // (idempotent: only the first run touches rows; later runs are no-ops)
+  await reconcileCatalogCategories();
+}
+
+// Older installs seeded "válvula" as its own category plus a placeholder "Kit
+// completo de válvula". The product structure is now: Balón / Kit de válvula
+// (Válvula Normal + Premium) / Productos (accesorios). This moves legacy data
+// into that shape without clobbering user edits.
+async function reconcileCatalogCategories() {
+  const now = isoNow();
+  // 1. Válvula products now live under the "kit" category (Kit de válvula)
+  await db.execute({ sql: `UPDATE products SET category='kit', updated_at=? WHERE category='válvula'`, args: [now] });
+  // 2. Normalise legacy names
+  await db.execute({ sql: `UPDATE products SET name='Válvula Normal',  updated_at=? WHERE name='Válvula normal'`,  args: [now] });
+  await db.execute({ sql: `UPDATE products SET name='Válvula Premium', updated_at=? WHERE name='Válvula premium'`, args: [now] });
+  await db.execute({ sql: `UPDATE products SET name='Producto de limpieza', updated_at=? WHERE name='Artículo limpieza'`, args: [now] });
+  // 3. Drop the unused placeholder kit product (only if never used in an order)
+  const placeholder = row(await db.execute({
+    sql: `SELECT id FROM products WHERE name='Kit completo de válvula' LIMIT 1`, args: [],
+  }));
+  if (placeholder) {
+    const ref = row(await db.execute({
+      sql: `SELECT COUNT(*) as c FROM order_items WHERE product_id = ?`, args: [placeholder.id],
+    }));
+    if (!ref || ref.c === 0) {
+      await db.execute({ sql: `DELETE FROM product_variants WHERE product_id = ?`, args: [placeholder.id] });
+      await db.execute({ sql: `DELETE FROM products WHERE id = ?`, args: [placeholder.id] });
+    }
+  }
+}
+
+async function seedCatalog() {
+  const cfg = await getConfig();
+  const p10  = parseFloat(cfg.price_10kg  || '38');
+  const p45  = parseFloat(cfg.price_45kg  || cfg.price_40kg || '120');
+  const pWat = parseFloat(cfg.price_water || '12');
+  const pCln = parseFloat(cfg.price_cleaning || '15');
+  const now  = isoNow();
+
+  const insProduct = async (name, category, salePrice, tracksInv, active) => {
+    const r = await db.execute({
+      sql: `INSERT INTO products (name, category, sale_price, tracks_inventory, active, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?)`,
+      args: [name, category, salePrice, tracksInv ? 1 : 0, active ? 1 : 0, now, now],
+    });
+    return lastId(r);
+  };
+
+  const insVariant = async (productId, brand, presKg, valveType, salePrice, active, sku) => {
+    await db.execute({
+      sql: `INSERT INTO product_variants (product_id, brand, presentation_kg, valve_type, sale_price, active, sku, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)`,
+      args: [productId, brand, presKg, valveType, salePrice, active ? 1 : 0, sku, now, now],
+    });
+  };
+
+  const balloonId = await insProduct('Balón de gas',          'balón',    0,    true,  true);
+                    await insProduct('Válvula Normal',         'kit',      65,   true,  true);
+                    await insProduct('Válvula Premium',        'kit',      65,   true,  true);
+                    await insProduct('Agua bidón 20L',         'accesorio',pWat, false, true);
+                    await insProduct('Producto de limpieza',   'accesorio',pCln, false, true);
+
+  // Balón 10 kg: all brands × both valve types → active, price = price_10kg
+  for (const [brand, code] of [['Solgas','SOL'],['Flama Gas','FLA'],['Otra marca','OTR']]) {
+    await insVariant(balloonId, brand, 10, 'normal',  p10, true,  `LM-${code}-10-N`);
+    await insVariant(balloonId, brand, 10, 'premium', p10, true,  `LM-${code}-10-P`);
+  }
+
+  // Balón 45 kg: Solgas active (takes legacy price_40kg), others pending
+  await insVariant(balloonId, 'Solgas',    45, null, p45, true,  'LM-SOL-45');
+  await insVariant(balloonId, 'Flama Gas', 45, null, 0,   false, 'LM-FLA-45');
+  await insVariant(balloonId, 'Otra marca',45, null, 0,   false, 'LM-OTR-45');
 }
 
 async function backfillClientPhones() {
@@ -1250,8 +1452,12 @@ app.get('/api/dashboard', async (req, res) => {
       args: [today],
     }));
 
-    const balloons_10  = items.filter(i => i.product === 'Balón 10kg').reduce((s, i) => s + i.quantity, 0);
-    const balloons_40  = items.filter(i => i.product === 'Balón 40kg').reduce((s, i) => s + i.quantity, 0);
+    const balloons_10  = items.filter(i =>
+      i.presentation_snapshot === '10 kg' || i.product === 'Balón 10kg'
+    ).reduce((s, i) => s + i.quantity, 0);
+    const balloons_40  = items.filter(i =>
+      i.presentation_snapshot === '45 kg' || i.product === 'Balón 40kg'
+    ).reduce((s, i) => s + i.quantity, 0);
     const balloonsToday = balloons_10 + balloons_40;
     const revenueToday  = deliveredToday.reduce((s, o) => s + (o.total || 0), 0);
     const pendingOrders = todayOrders.filter(o => o.status === 'Pendiente' || o.status === 'En camino');
@@ -1427,75 +1633,328 @@ app.get('/api/orders/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Returns a {sql, args} statement — compatible with db.execute() and tx.execute()
+function buildItemStmt(orderId, item) {
+  const productText = item.product_name_snapshot || item.product || '';
+  const subtotal    = item.quantity * item.unit_price;
+  return {
+    sql: `INSERT INTO order_items
+            (order_id, product, description, quantity, unit_price, subtotal,
+             product_id, variant_id, product_name_snapshot, category_snapshot,
+             brand_snapshot, presentation_snapshot, valve_type_snapshot, catalog_unit_price)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    args: [
+      orderId, productText, item.description || '',
+      item.quantity, item.unit_price, subtotal,
+      item.product_id             ?? null, item.variant_id             ?? null,
+      item.product_name_snapshot  ?? null, item.category_snapshot      ?? null,
+      item.brand_snapshot         ?? null, item.presentation_snapshot  ?? null,
+      item.valve_type_snapshot    ?? null, item.catalog_unit_price     ?? null,
+    ],
+  };
+}
+
+// ─── ORDER / STATUS ENUMS ──────────────────────────────────────────────────────
+const ALLOWED_ORDER_STATUSES  = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
+const ORDER_PAYMENT_METHODS   = ['Efectivo', 'Yape', 'Plin', 'Transferencia', 'Tarjeta', 'Fiado'];
+
+// ─── CATALOG VARIANT RULES ─────────────────────────────────────────────────────
+const ALLOWED_VALVE_TYPES = ['normal', 'premium'];
+
+// Returns an error string on violation, null on valid.
+// product: row from products table (must have .category)
+// variantData: merged object with at least { presentation_kg, valve_type }
+function validateVariantRules(product, variantData) {
+  const presKg = variantData.presentation_kg != null ? Number(variantData.presentation_kg) : null;
+  const valve  = variantData.valve_type;             // null, undefined, '' or 'normal'/'premium'
+  const valvePresent = valve !== null && valve !== undefined && valve !== '';
+
+  if (product.category === 'balón') {
+    if (presKg === 10) {
+      if (!ALLOWED_VALVE_TYPES.includes(valve)) {
+        return 'Balón de 10 kg requiere valve_type "normal" o "premium"';
+      }
+    } else if (presKg === 45) {
+      if (valvePresent) {
+        return 'Balón de 45 kg no puede tener valve_type (debe ser null)';
+      }
+    } else {
+      return `presentation_kg debe ser 10 o 45 para balones (recibido: ${presKg})`;
+    }
+  } else {
+    if (valvePresent) {
+      return `Productos de categoría "${product.category}" no pueden tener valve_type`;
+    }
+  }
+  return null;
+}
+
+// ─── ORDER ITEM VALIDATION & SNAPSHOT ENRICHMENT ──────────────────────────────
+// Validates items and (for catalog_version=1) enriches with server-side snapshots.
+// Throws { status, message } on validation failure.
+// executor: db or an open transaction — reads happen through the same connection.
+async function validateAndEnrichItems(items, catalogVersion, executor = db) {
+  const enriched = [];
+  for (let idx = 0; idx < (items || []).length; idx++) {
+    const item = items[idx];
+    const pos  = `Ítem ${idx + 1}`;
+    const qty  = parseInt(item.quantity, 10);
+    const price = parseFloat(item.unit_price);
+
+    if (!Number.isFinite(qty) || qty <= 0) {
+      throw { status: 400, message: `${pos}: quantity debe ser un entero mayor que cero (recibido: ${item.quantity})` };
+    }
+    if (!Number.isFinite(price) || price <= 0) {
+      throw { status: 400, message: `${pos}: unit_price debe ser mayor que cero (recibido: ${item.unit_price})` };
+    }
+
+    if (catalogVersion !== 1) {
+      // Legacy: keep product text as-is, no catalog validation, no snapshots
+      enriched.push({
+        product:               item.product || '',
+        description:           item.description || '',
+        quantity:              qty,
+        unit_price:            price,
+        product_id:            null,
+        variant_id:            null,
+        product_name_snapshot: null,
+        category_snapshot:     null,
+        brand_snapshot:        null,
+        presentation_snapshot: null,
+        valve_type_snapshot:   null,
+        catalog_unit_price:    null,
+      });
+      continue;
+    }
+
+    // catalog_version=1: require product_id, validate catalog state, generate snapshots
+    if (!item.product_id) {
+      throw { status: 400, message: `${pos}: product_id requerido para pedidos con catalog_version=1` };
+    }
+    const product = row(await executor.execute({
+      sql: 'SELECT * FROM products WHERE id = ?',
+      args: [item.product_id],
+    }));
+    if (!product) {
+      throw { status: 400, message: `${pos}: producto id=${item.product_id} no existe` };
+    }
+    if (!product.active) {
+      throw { status: 400, message: `${pos}: producto "${product.name}" está inactivo — no se puede pedir` };
+    }
+
+    let variant = null;
+    let catalogPrice = product.sale_price || 0;
+
+    if (item.variant_id) {
+      variant = row(await executor.execute({
+        sql: 'SELECT * FROM product_variants WHERE id = ? AND product_id = ?',
+        args: [item.variant_id, item.product_id],
+      }));
+      if (!variant) {
+        throw { status: 400, message: `${pos}: variante id=${item.variant_id} no existe o no pertenece al producto ${item.product_id}` };
+      }
+      if (!variant.active) {
+        throw { status: 400, message: `${pos}: variante "${variant.brand} ${variant.presentation_kg}kg" está inactiva` };
+      }
+      if (!variant.sale_price || variant.sale_price <= 0) {
+        throw { status: 400, message: `${pos}: variante sin precio configurado (pendiente de activar)` };
+      }
+      catalogPrice = variant.sale_price;
+    } else if (product.category === 'balón') {
+      throw { status: 400, message: `${pos}: los balones de gas requieren variant_id` };
+    } else if (!product.sale_price || product.sale_price <= 0) {
+      throw { status: 400, message: `${pos}: producto "${product.name}" sin precio — pendiente de configurar` };
+    }
+
+    const presSnap = variant?.presentation_kg != null ? `${variant.presentation_kg} kg` : null;
+    const nameSnap = variant
+      ? [variant.brand, presSnap, variant.valve_type ? `válvula ${variant.valve_type}` : null].filter(Boolean).join(' ')
+      : product.name;
+
+    enriched.push({
+      product:               nameSnap,
+      description:           item.description || '',
+      quantity:              qty,
+      unit_price:            price,
+      product_id:            product.id,
+      variant_id:            variant?.id ?? null,
+      product_name_snapshot: nameSnap,
+      category_snapshot:     product.category,
+      brand_snapshot:        variant?.brand ?? null,
+      presentation_snapshot: presSnap,
+      valve_type_snapshot:   variant?.valve_type ?? null,
+      catalog_unit_price:    catalogPrice,
+    });
+  }
+  return enriched;
+}
+
 app.post('/api/orders', async (req, res) => {
   try {
-    const { client_id, rider_id, payment_method, notes, items } = req.body;
-    const total = (items || []).reduce((s, i) => s + (i.quantity * i.unit_price), 0);
+    const { client_id, rider_id, payment_method, notes, items, catalog_version } = req.body;
+    const cv = catalog_version === 1 ? 1 : 0;
 
-    const r = await db.execute({
-      sql:  `INSERT INTO orders (client_id, rider_id, payment_method, notes, total) VALUES (?,?,?,?,?)`,
-      args: [client_id, rider_id, payment_method || 'Efectivo', notes, total],
-    });
-    const orderId = lastId(r);
+    if (!items || !items.length) return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
 
-    await Promise.all((items || []).map(item =>
-      db.execute({
-        sql:  `INSERT INTO order_items (order_id, product, description, quantity, unit_price, subtotal) VALUES (?,?,?,?,?,?)`,
-        args: [orderId, item.product, item.description || '', item.quantity, item.unit_price, item.quantity * item.unit_price],
-      })
-    ));
+    // Open transaction first so catalog reads and writes share the same snapshot (M1: TOCTOU fix)
+    const tx = await db.transaction('write');
+    try {
+      const enriched = await validateAndEnrichItems(items, cv, tx);
+      const total = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
 
-    if (payment_method === 'Fiado' && client_id) {
-      await db.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [total, client_id] });
+      const r = await tx.execute({
+        sql:  'INSERT INTO orders (client_id, rider_id, payment_method, notes, total, catalog_version) VALUES (?,?,?,?,?,?)',
+        args: [client_id ?? null, rider_id ?? null, payment_method || 'Efectivo', notes ?? null, total, cv],
+      });
+      const orderId = lastId(r);
+      for (const item of enriched) {
+        await tx.execute(buildItemStmt(orderId, item));
+      }
+      if (payment_method === 'Fiado' && client_id) {
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [total, client_id] });
+      }
+      await tx.commit();
+      res.json({ id: orderId });
+    } catch (txErr) {
+      await tx.rollback();
+      throw txErr;
     }
-    res.json({ id: orderId });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.put('/api/orders/:id', async (req, res) => {
   try {
     const { status, rider_id, payment_method, notes, items } = req.body;
-    const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [req.params.id] }));
+    const oid      = req.params.id;
+    const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [oid] }));
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
 
-    const total       = items ? items.reduce((s, i) => s + (i.quantity * i.unit_price), 0) : existing.total;
-    const deliveredAt = status === 'Entregado' && existing.status !== 'Entregado'
-      ? new Date().toISOString()
-      : existing.delivered_at;
-
-    await db.execute({
-      sql:  `UPDATE orders SET status=?, rider_id=?, payment_method=?, notes=?, total=?, delivered_at=? WHERE id=?`,
-      args: [status ?? existing.status, rider_id ?? existing.rider_id, payment_method ?? existing.payment_method, notes ?? existing.notes, total, deliveredAt, req.params.id],
-    });
-
-    if (items) {
-      await db.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [req.params.id] });
-      await Promise.all(items.map(item =>
-        db.execute({
-          sql:  `INSERT INTO order_items (order_id, product, description, quantity, unit_price, subtotal) VALUES (?,?,?,?,?,?)`,
-          args: [req.params.id, item.product, item.description || '', item.quantity, item.unit_price, item.quantity * item.unit_price],
-        })
-      ));
+    // H4: validate status enum
+    if (status !== undefined && !ALLOWED_ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Estado inválido. Permitidos: ${ALLOWED_ORDER_STATUSES.join(', ')}` });
     }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+
+    if (items !== undefined && items !== null && !items.length) {
+      return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
+    }
+
+    const newCv             = req.body.catalog_version ?? existing.catalog_version ?? 0;
+    const newPaymentMethod  = payment_method ?? existing.payment_method;
+    const newStatus         = status         ?? existing.status;
+
+    // Atomic: catalog reads + all writes share the same transaction (M1: TOCTOU fix)
+    const tx = await db.transaction('write');
+    try {
+      let enriched = null;
+      let newTotal  = existing.total;
+      if (items) {
+        enriched = await validateAndEnrichItems(items, newCv, tx);
+        newTotal = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      }
+
+      const deliveredAt = newStatus === 'Entregado' && existing.status !== 'Entregado'
+        ? new Date().toISOString()
+        : existing.delivered_at;
+
+      // H2: compute debt delta from old vs new (Fiado total contribution)
+      const oldDebtContrib = existing.payment_method === 'Fiado' ? (existing.total || 0) : 0;
+      const newDebtContrib = newPaymentMethod         === 'Fiado' ? newTotal               : 0;
+      const debtDelta      = newDebtContrib - oldDebtContrib;
+
+      await tx.execute({
+        sql:  'UPDATE orders SET status=?, rider_id=?, payment_method=?, notes=?, total=?, delivered_at=?, catalog_version=? WHERE id=?',
+        args: [newStatus, rider_id ?? existing.rider_id, newPaymentMethod, notes ?? existing.notes, newTotal, deliveredAt, newCv, oid],
+      });
+      if (enriched) {
+        await tx.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [oid] });
+        for (const item of enriched) {
+          await tx.execute(buildItemStmt(oid, item));
+        }
+      }
+      if (debtDelta !== 0 && existing.client_id) {
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [debtDelta, existing.client_id] });
+      }
+      await tx.commit();
+      res.json({ ok: true });
+    } catch (txErr) {
+      await tx.rollback();
+      throw txErr;
+    }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
+
+    // H4: validate status enum
+    if (!ALLOWED_ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Estado inválido. Permitidos: ${ALLOWED_ORDER_STATUSES.join(', ')}` });
+    }
+
     const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [req.params.id] }));
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
+
     const deliveredAt = status === 'Entregado' ? new Date().toISOString() : existing.delivered_at;
-    await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+
+    // H2: reconcile Fiado debt on cancel / un-cancel
+    let debtDelta = 0;
+    if (existing.client_id && existing.payment_method === 'Fiado') {
+      if (status === 'Cancelado' && existing.status !== 'Cancelado') {
+        debtDelta = -(existing.total || 0);
+      } else if (existing.status === 'Cancelado' && status !== 'Cancelado') {
+        debtDelta = existing.total || 0;
+      }
+    }
+
+    if (debtDelta !== 0) {
+      const tx = await db.transaction('write');
+      try {
+        await tx.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [debtDelta, existing.client_id] });
+        await tx.commit();
+      } catch (txErr) { await tx.rollback(); throw txErr; }
+    } else {
+      await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+    }
+
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/orders/:id', async (req, res) => {
   try {
-    await db.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [req.params.id] });
-    await db.execute({ sql: 'DELETE FROM orders WHERE id = ?', args: [req.params.id] });
+    const oid = req.params.id;
+    const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [oid] }));
+    if (!existing) return res.status(404).json({ error: 'No encontrado' });
+
+    const tx = await db.transaction('write');
+    try {
+      // M5: remove payment audit trail before removing the order
+      await tx.execute({
+        sql: `DELETE FROM cash_handovers WHERE payment_id IN (SELECT id FROM payments WHERE order_id = ?)`,
+        args: [oid],
+      });
+      await tx.execute({
+        sql: `DELETE FROM payment_events WHERE payment_id IN (SELECT id FROM payments WHERE order_id = ?)`,
+        args: [oid],
+      });
+      await tx.execute({ sql: 'DELETE FROM payments WHERE order_id = ?', args: [oid] });
+      await tx.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [oid] });
+      await tx.execute({ sql: 'DELETE FROM orders WHERE id = ?', args: [oid] });
+      // H2: remove Fiado debt only if order was not already cancelled (cancelled orders already had debt removed)
+      if (existing.payment_method === 'Fiado' && existing.client_id && existing.status !== 'Cancelado') {
+        await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [-(existing.total || 0), existing.client_id] });
+      }
+      await tx.commit();
+    } catch (txErr) { await tx.rollback(); throw txErr; }
+
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1568,21 +2027,35 @@ app.get('/api/reports/sales', async (req, res) => {
     const { from, to, group_by } = req.query;
     const fromDate = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const toDate   = to || todayStr();
-    let dateGroup;
-    if (group_by === 'week')  dateGroup = `strftime('%Y-W%W', o.created_at)`;
-    else if (group_by === 'month') dateGroup = `strftime('%Y-%m', o.created_at)`;
-    else dateGroup = `date(o.created_at)`;
+    // Build date grouping expression for the CTE
+    let periodExpr;
+    if (group_by === 'week')       periodExpr = `strftime('%Y-W%W', created_at)`;
+    else if (group_by === 'month') periodExpr = `strftime('%Y-%m', created_at)`;
+    else                           periodExpr = `date(created_at)`;
+
+    // CTE ensures each order's total is counted exactly once (no LEFT JOIN multiplication)
     const sales = rows(await db.execute({
-      sql: `SELECT ${dateGroup} as period,
-              COUNT(DISTINCT o.id) as orders,
-              COALESCE(SUM(o.total), 0) as revenue,
-              COALESCE(SUM(CASE WHEN oi.product='Balón 10kg' THEN oi.quantity ELSE 0 END), 0) as balloons_10,
-              COALESCE(SUM(CASE WHEN oi.product='Balón 40kg' THEN oi.quantity ELSE 0 END), 0) as balloons_40,
-              COALESCE(SUM(CASE WHEN oi.product='Agua bidón 20L' THEN oi.quantity ELSE 0 END), 0) as water
-            FROM orders o
-            LEFT JOIN order_items oi ON oi.order_id = o.id
-            WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
-            GROUP BY period ORDER BY period`,
+      sql: `WITH o_totals AS (
+              SELECT id, total, ${periodExpr} AS period
+              FROM orders
+              WHERE date(created_at) BETWEEN ? AND ? AND status = 'Entregado'
+            ),
+            i_agg AS (
+              SELECT order_id,
+                COALESCE(SUM(CASE WHEN presentation_snapshot='10 kg' OR product='Balón 10kg' THEN quantity ELSE 0 END),0) AS balloons_10,
+                COALESCE(SUM(CASE WHEN presentation_snapshot='45 kg' OR product='Balón 40kg' THEN quantity ELSE 0 END),0) AS balloons_40,
+                COALESCE(SUM(CASE WHEN (category_snapshot='accesorio' AND product_name_snapshot LIKE '%bidón%') OR product='Agua bidón 20L' THEN quantity ELSE 0 END),0) AS water
+              FROM order_items GROUP BY order_id
+            )
+            SELECT ot.period,
+              COUNT(ot.id)                        AS orders,
+              COALESCE(SUM(ot.total), 0)           AS revenue,
+              COALESCE(SUM(ia.balloons_10), 0)     AS balloons_10,
+              COALESCE(SUM(ia.balloons_40), 0)     AS balloons_40,
+              COALESCE(SUM(ia.water), 0)           AS water
+            FROM o_totals ot
+            LEFT JOIN i_agg ia ON ia.order_id = ot.id
+            GROUP BY ot.period ORDER BY ot.period`,
       args: [fromDate, toDate],
     }));
     res.json(sales);
@@ -1595,11 +2068,23 @@ app.get('/api/reports/by-zone', async (req, res) => {
     const fromDate = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const toDate   = to || todayStr();
     res.json(rows(await db.execute({
-      sql: `SELECT c.zone, COUNT(DISTINCT o.id) as orders, COALESCE(SUM(o.total),0) as revenue,
-              COALESCE(SUM(CASE WHEN oi.product LIKE 'Balón%' THEN oi.quantity ELSE 0 END),0) as balloons
-            FROM orders o JOIN clients c ON o.client_id=c.id
-            LEFT JOIN order_items oi ON oi.order_id=o.id
-            WHERE date(o.created_at) BETWEEN ? AND ? AND o.status='Entregado'
+      sql: `WITH o_totals AS (
+              SELECT o.id, o.total, o.client_id
+              FROM orders o
+              WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
+            ),
+            i_agg AS (
+              SELECT order_id,
+                COALESCE(SUM(CASE WHEN category_snapshot='balón' OR product LIKE 'Balón%' THEN quantity ELSE 0 END),0) AS balloons
+              FROM order_items GROUP BY order_id
+            )
+            SELECT c.zone,
+              COUNT(DISTINCT ot.id)           AS orders,
+              COALESCE(SUM(ot.total), 0)       AS revenue,
+              COALESCE(SUM(ia.balloons), 0)    AS balloons
+            FROM o_totals ot
+            JOIN clients c ON c.id = ot.client_id
+            LEFT JOIN i_agg ia ON ia.order_id = ot.id
             GROUP BY c.zone ORDER BY revenue DESC`,
       args: [fromDate, toDate],
     })));
@@ -1627,12 +2112,23 @@ app.get('/api/reports/by-rider', async (req, res) => {
     const fromDate = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const toDate   = to || todayStr();
     res.json(rows(await db.execute({
-      sql: `SELECT r.name, r.id as rider_id, COUNT(DISTINCT o.id) as orders,
-              COALESCE(SUM(o.total),0) as revenue,
-              COALESCE(SUM(CASE WHEN oi.product LIKE 'Balón%' THEN oi.quantity ELSE 0 END),0) as balloons
-            FROM orders o JOIN riders r ON o.rider_id=r.id
-            LEFT JOIN order_items oi ON oi.order_id=o.id
-            WHERE date(o.created_at) BETWEEN ? AND ? AND o.status='Entregado'
+      sql: `WITH o_totals AS (
+              SELECT o.id, o.total, o.rider_id
+              FROM orders o
+              WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
+            ),
+            i_agg AS (
+              SELECT order_id,
+                COALESCE(SUM(CASE WHEN category_snapshot='balón' OR product LIKE 'Balón%' THEN quantity ELSE 0 END),0) AS balloons
+              FROM order_items GROUP BY order_id
+            )
+            SELECT r.name, r.id AS rider_id,
+              COUNT(DISTINCT ot.id)         AS orders,
+              COALESCE(SUM(ot.total), 0)     AS revenue,
+              COALESCE(SUM(ia.balloons), 0)  AS balloons
+            FROM o_totals ot
+            JOIN riders r ON r.id = ot.rider_id
+            LEFT JOIN i_agg ia ON ia.order_id = ot.id
             GROUP BY r.id ORDER BY revenue DESC`,
       args: [fromDate, toDate],
     })));
@@ -1645,12 +2141,23 @@ app.get('/api/reports/top-clients', async (req, res) => {
     const fromDate = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const toDate   = to || todayStr();
     res.json(rows(await db.execute({
-      sql: `SELECT c.id, c.name, c.phone, c.zone, c.is_vip,
-              COUNT(DISTINCT o.id) as orders, COALESCE(SUM(o.total),0) as revenue,
-              COALESCE(SUM(CASE WHEN oi.product LIKE 'Balón%' THEN oi.quantity ELSE 0 END),0) as balloons
-            FROM clients c JOIN orders o ON o.client_id=c.id
-            LEFT JOIN order_items oi ON oi.order_id=o.id
-            WHERE date(o.created_at) BETWEEN ? AND ? AND o.status='Entregado'
+      sql: `WITH o_totals AS (
+              SELECT o.id, o.total, o.client_id
+              FROM orders o
+              WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
+            ),
+            i_agg AS (
+              SELECT order_id,
+                COALESCE(SUM(CASE WHEN category_snapshot='balón' OR product LIKE 'Balón%' THEN quantity ELSE 0 END),0) AS balloons
+              FROM order_items GROUP BY order_id
+            )
+            SELECT c.id, c.name, c.phone, c.zone, c.is_vip,
+              COUNT(DISTINCT ot.id)         AS orders,
+              COALESCE(SUM(ot.total), 0)     AS revenue,
+              COALESCE(SUM(ia.balloons), 0)  AS balloons
+            FROM clients c
+            JOIN o_totals ot ON ot.client_id = c.id
+            LEFT JOIN i_agg ia ON ia.order_id = ot.id
             GROUP BY c.id ORDER BY revenue DESC LIMIT 10`,
       args: [fromDate, toDate],
     })));
@@ -1719,6 +2226,397 @@ app.get('/api/reports/export/inactive', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="clientes_inactivos.xlsx"`);
     await wb.xlsx.write(res);
     res.end();
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── CATALOG ──────────────────────────────────────────────────────────────────
+app.get('/api/catalog', async (req, res) => {
+  try {
+    const products  = rows(await db.execute({ sql: 'SELECT * FROM products ORDER BY category, name', args: [] }));
+    const variants  = rows(await db.execute({ sql: 'SELECT * FROM product_variants ORDER BY product_id, presentation_kg, brand', args: [] }));
+    res.json(products.map(p => ({ ...p, variants: variants.filter(v => v.product_id === p.id) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/catalog/available', async (req, res) => {
+  try {
+    const products = rows(await db.execute({ sql: 'SELECT * FROM products WHERE active=1 ORDER BY category, name', args: [] }));
+    const variants = rows(await db.execute({
+      sql: `SELECT * FROM product_variants WHERE active=1 AND sale_price IS NOT NULL AND sale_price > 0
+            ORDER BY product_id, presentation_kg, brand`,
+      args: [],
+    }));
+    const result = products.map(p => {
+      const pvs = variants.filter(v => v.product_id === p.id);
+      if (pvs.length > 0) return { ...p, variants: pvs };
+      if (p.sale_price > 0) return { ...p, variants: [] };
+      return null;
+    }).filter(Boolean);
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/catalog/products', async (req, res) => {
+  try {
+    const { name, category, description, sku, sale_price, unit, tracks_inventory, active } = req.body;
+    if (!name || !category) return res.status(400).json({ error: 'name y category requeridos' });
+    const now = isoNow();
+    const r = await db.execute({
+      sql: `INSERT INTO products (name, category, description, sku, sale_price, unit, tracks_inventory, active, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      args: [name, category, description||null, sku||null, sale_price||0, unit||'unidad',
+             tracks_inventory?1:0, active!==false?1:0, now, now],
+    });
+    res.json({ id: lastId(r) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/catalog/products/:id', async (req, res) => {
+  try {
+    // Load existing record so we can validate the final merged state
+    const existing = row(await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] }));
+    if (!existing) return res.status(404).json({ error: 'Producto no encontrado' });
+
+    const { name, category, description, sku, sale_price, unit, tracks_inventory, active } = req.body;
+
+    // Compute the final values after merging body with existing
+    const finalActive = active !== undefined ? Boolean(active) : Boolean(existing.active);
+    const finalPrice  = sale_price !== undefined ? Number(sale_price) : Number(existing.sale_price);
+
+    if (finalActive && (!finalPrice || finalPrice <= 0)) {
+      return res.status(400).json({ error: 'No se puede activar un producto sin precio válido mayor que cero' });
+    }
+
+    const now = isoNow();
+    await db.execute({
+      sql: `UPDATE products SET
+            name=COALESCE(?,name), category=COALESCE(?,category), description=COALESCE(?,description),
+            sku=COALESCE(?,sku), sale_price=COALESCE(?,sale_price), unit=COALESCE(?,unit),
+            tracks_inventory=COALESCE(?,tracks_inventory), active=?, updated_at=?
+            WHERE id=?`,
+      args: [name||null, category||null, description||null, sku||null,
+             sale_price!=null?sale_price:null, unit||null,
+             tracks_inventory!=null?(tracks_inventory?1:0):null,
+             finalActive?1:0, now, req.params.id],
+    });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/catalog/variants', async (req, res) => {
+  try {
+    const { product_id, brand, presentation_kg, valve_type, sku, sale_price, active } = req.body;
+    if (!product_id) return res.status(400).json({ error: 'product_id requerido' });
+
+    const product = row(await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [product_id] }));
+    if (!product) return res.status(400).json({ error: `Producto id=${product_id} no encontrado` });
+
+    // Normalise valve_type: treat empty string as null
+    const normalValve = (valve_type === '' || valve_type === undefined) ? null : valve_type;
+    const variantData = { presentation_kg: presentation_kg ?? null, valve_type: normalValve };
+
+    const ruleError = validateVariantRules(product, variantData);
+    if (ruleError) return res.status(400).json({ error: ruleError });
+
+    const now = isoNow();
+    const r = await db.execute({
+      sql: `INSERT INTO product_variants (product_id, brand, presentation_kg, valve_type, sku, sale_price, active, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)`,
+      args: [product_id, brand||null, presentation_kg??null, normalValve, sku||null,
+             sale_price||0, active!==false?1:0, now, now],
+    });
+    res.json({ id: lastId(r) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/catalog/variants/:id', async (req, res) => {
+  try {
+    // Load existing variant to merge and validate the final state
+    const existing = row(await db.execute({ sql: 'SELECT * FROM product_variants WHERE id = ?', args: [req.params.id] }));
+    if (!existing) return res.status(404).json({ error: 'Variante no encontrada' });
+
+    const product = row(await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [existing.product_id] }));
+    if (!product) return res.status(404).json({ error: 'Producto padre no encontrado' });
+
+    // Merge: undefined in body → keep existing; explicit value (incl. null) → use it
+    const b = req.body;
+    const normalValve = b.valve_type !== undefined
+      ? (b.valve_type === '' ? null : b.valve_type)
+      : existing.valve_type;
+
+    const merged = {
+      presentation_kg: b.presentation_kg !== undefined ? b.presentation_kg : existing.presentation_kg,
+      valve_type:      normalValve,
+    };
+
+    const ruleError = validateVariantRules(product, merged);
+    if (ruleError) return res.status(400).json({ error: ruleError });
+
+    // Compute final active + price for the activation guard
+    const finalActive = b.active !== undefined ? Boolean(b.active) : Boolean(existing.active);
+    const finalPrice  = b.sale_price !== undefined ? Number(b.sale_price) : Number(existing.sale_price);
+    if (finalActive && (!finalPrice || finalPrice <= 0)) {
+      return res.status(400).json({ error: 'No se puede activar una variante sin precio válido mayor que cero' });
+    }
+
+    const now = isoNow();
+    await db.execute({
+      sql: `UPDATE product_variants SET
+            brand=COALESCE(?,brand), presentation_kg=?, valve_type=?, sku=COALESCE(?,sku),
+            sale_price=COALESCE(?,sale_price), active=?, updated_at=?
+            WHERE id=?`,
+      args: [b.brand||null,
+             merged.presentation_kg ?? existing.presentation_kg,
+             merged.valve_type,          // may be null — set explicitly, not via COALESCE
+             b.sku||null, b.sale_price!=null?b.sale_price:null,
+             finalActive?1:0, now, req.params.id],
+    });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── INVENTORY ────────────────────────────────────────────────────────────────
+app.get('/api/inventory/stock', async (req, res) => {
+  try {
+    res.json(rows(await db.execute({
+      sql: `SELECT s.*, p.name as product_name, p.category,
+                   pv.brand, pv.presentation_kg, pv.valve_type
+            FROM inventory_stock s
+            JOIN products p ON s.product_id = p.id
+            LEFT JOIN product_variants pv ON s.variant_id = pv.id
+            ORDER BY p.category, p.name, pv.presentation_kg, pv.brand`,
+      args: [],
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+const ALLOWED_MOVEMENT_TYPES = ['entrada', 'salida', 'merma', 'devolucion', 'ajuste_positivo', 'ajuste_negativo'];
+const OUT_MOVEMENT_TYPES     = new Set(['salida', 'merma', 'ajuste_negativo']);
+
+app.post('/api/inventory/adjust', async (req, res) => {
+  try {
+    const { product_id, variant_id, movement_type, quantity, stock_type, notes, rider_id, order_id } = req.body;
+
+    // ── Input validation ────────────────────────────────────────────────────────
+    if (!product_id)    return res.status(400).json({ error: 'product_id requerido' });
+    if (!movement_type) return res.status(400).json({ error: 'movement_type requerido' });
+    if (!ALLOWED_MOVEMENT_TYPES.includes(movement_type)) {
+      return res.status(400).json({ error: `movement_type inválido. Permitidos: ${ALLOWED_MOVEMENT_TYPES.join(', ')}` });
+    }
+    const qty = parseInt(quantity, 10);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return res.status(400).json({ error: 'quantity debe ser un entero mayor que cero' });
+    }
+    if (!notes || String(notes).trim() === '') {
+      return res.status(400).json({ error: 'notes (motivo) es obligatorio para todo ajuste' });
+    }
+
+    // ── Referential validation ──────────────────────────────────────────────────
+    const product = row(await db.execute({ sql: 'SELECT id FROM products WHERE id = ?', args: [product_id] }));
+    if (!product) return res.status(400).json({ error: `Producto id=${product_id} no existe` });
+
+    const vid = variant_id || null;
+    if (vid) {
+      const variant = row(await db.execute({
+        sql: 'SELECT id FROM product_variants WHERE id = ? AND product_id = ?',
+        args: [vid, product_id],
+      }));
+      if (!variant) return res.status(400).json({ error: `Variante id=${vid} no existe o no pertenece al producto ${product_id}` });
+    }
+
+    const sType = stock_type || 'disponible';
+    const now   = isoNow();
+
+    // H3: fully atomic find-or-create inside a single transaction.
+    // INSERT OR IGNORE relies on idx_inventory_stock_unique (product_id, stock_type, COALESCE(variant_id,-1)).
+    const tx = await db.transaction('write');
+    try {
+      await tx.execute({
+        sql: `INSERT OR IGNORE INTO inventory_stock (product_id, variant_id, stock_type, quantity, updated_at)
+              VALUES (?, ?, ?, 0, ?)`,
+        args: [product_id, vid, sType, now],
+      });
+
+      const stockRow = row(await tx.execute({
+        sql: `SELECT * FROM inventory_stock WHERE product_id=? AND stock_type=? AND (variant_id IS ? OR variant_id=?)`,
+        args: [product_id, sType, vid, vid],
+      }));
+
+      const stockBefore = stockRow.quantity;
+      const isOut       = OUT_MOVEMENT_TYPES.has(movement_type);
+      const delta       = isOut ? -qty : qty;
+      const stockAfter  = stockBefore + delta;
+
+      if (stockAfter < 0) {
+        await tx.rollback();
+        return res.status(400).json({
+          error: `Operación rechazada: stock disponible es ${stockBefore} y la salida es ${qty} — el resultado sería negativo`,
+          stock_before: stockBefore,
+        });
+      }
+
+      await tx.execute({
+        sql: 'UPDATE inventory_stock SET quantity=?, updated_at=? WHERE id=?',
+        args: [stockAfter, now, stockRow.id],
+      });
+      await tx.execute({
+        sql: `INSERT INTO inventory_movements
+                (product_id, variant_id, movement_type, quantity, stock_before, stock_after,
+                 order_id, rider_id, notes, created_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        args: [product_id, vid, movement_type, qty, stockBefore, stockAfter,
+               order_id||null, rider_id||null, String(notes).trim(), now],
+      });
+      await tx.commit();
+      res.json({ stock_before: stockBefore, stock_after: stockAfter });
+    } catch (txErr) {
+      await tx.rollback();
+      throw txErr;
+    }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+const MAX_MOVEMENTS_LIMIT = 500;
+
+app.get('/api/inventory/movements', async (req, res) => {
+  try {
+    const { product_id, variant_id, from, to } = req.query;
+    // M6: cap limit to prevent unbounded result sets
+    const rawLim = parseInt(req.query.limit) || 100;
+    if (rawLim > MAX_MOVEMENTS_LIMIT) {
+      return res.status(400).json({ error: `El parámetro limit no puede superar ${MAX_MOVEMENTS_LIMIT}` });
+    }
+    const lim = rawLim;
+    let sql = `SELECT m.*, p.name as product_name, pv.brand, pv.presentation_kg, pv.valve_type
+               FROM inventory_movements m
+               JOIN products p ON m.product_id = p.id
+               LEFT JOIN product_variants pv ON m.variant_id = pv.id WHERE 1=1`;
+    const args = [];
+    if (product_id) { sql += ` AND m.product_id=?`; args.push(product_id); }
+    if (variant_id) { sql += ` AND m.variant_id=?`; args.push(variant_id); }
+    if (from)       { sql += ` AND date(m.created_at) >= ?`; args.push(from); }
+    if (to)         { sql += ` AND date(m.created_at) <= ?`; args.push(to); }
+    sql += ` ORDER BY m.created_at DESC LIMIT ?`;
+    args.push(lim);
+    res.json(rows(await db.execute({ sql, args })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── DAILY DETAIL REPORT ──────────────────────────────────────────────────────
+app.get('/api/reports/daily-detail', async (req, res) => {
+  try {
+    const d = req.query.date || todayStr();
+
+    // Load orders with client, rider, and payment info in one query
+    const orderList = rows(await db.execute({
+      sql: `SELECT o.id, o.status, o.payment_method, o.total, o.catalog_version,
+                   o.created_at, o.delivered_at,
+                   c.name AS client_name, c.address AS client_address, c.zone,
+                   r.name AS rider_name,
+                   p.destination AS payment_destination,
+                   COALESCE(p.status, 'sin_registrar') AS reconciliation_status
+            FROM orders o
+            LEFT JOIN clients c ON o.client_id = c.id
+            LEFT JOIN riders r ON o.rider_id = r.id
+            LEFT JOIN payments p ON p.order_id = o.id
+            WHERE date(o.created_at) = ? ORDER BY o.created_at`,
+      args: [d],
+    }));
+
+    const ids = orderList.map(o => o.id);
+    let itemList = [];
+    if (ids.length) {
+      itemList = rows(await db.execute({
+        sql: `SELECT * FROM order_items WHERE order_id IN (${ids.map(() => '?').join(',')})`,
+        args: ids,
+      }));
+    }
+
+    const orders    = orderList.map(o => ({ ...o, items: itemList.filter(i => i.order_id === o.id) }));
+    const delivered = orders.filter(o => o.status === 'Entregado');
+
+    // ── Item classifiers (snapshot-first, legacy fallback) ─────────────────────
+    const pname  = i => (i.product_name_snapshot || i.product || '').toLowerCase();
+    const is10   = i => i.presentation_snapshot === '10 kg' || i.product === 'Balón 10kg';
+    const is45   = i => i.presentation_snapshot === '45 kg' || i.product === 'Balón 40kg';
+    const isBalloon = i => i.category_snapshot === 'balón' || is10(i) || is45(i);
+    const isValv = i => i.category_snapshot === 'válvula' || (pname(i).includes('válvula') && !isBalloon(i));
+    const isKit  = i => i.category_snapshot === 'kit'     || pname(i).includes('kit');
+
+    // C2: counters use ONLY items from delivered orders to match revenue denominator
+    const deliveredIds    = new Set(delivered.map(o => o.id));
+    const deliveredItems  = itemList.filter(i => deliveredIds.has(i.order_id));
+
+    // ── Summary counters ────────────────────────────────────────────────────────
+    let b10 = 0, b45 = 0, b10n = 0, b10p = 0;
+    const vn  = { quantity: 0, amount: 0 };
+    const vp  = { quantity: 0, amount: 0 };
+    const kts = { quantity: 0, amount: 0 };
+    const oth = { quantity: 0, amount: 0 };
+    const brandMap = {};
+
+    for (const i of deliveredItems) {
+      const qty = i.quantity || 0;
+      const sub = i.subtotal || (qty * (i.unit_price || 0));
+
+      if (isBalloon(i)) {
+        if (is10(i)) {
+          b10 += qty;
+          if (i.valve_type_snapshot === 'normal')  b10n += qty;
+          if (i.valve_type_snapshot === 'premium') b10p += qty;
+        }
+        if (is45(i)) b45 += qty;
+        const brand = i.brand_snapshot || 'Sin marca';
+        brandMap[brand] = (brandMap[brand] || 0) + qty;
+      } else if (isValv(i)) {
+        const vtype = i.valve_type_snapshot;
+        if (vtype === 'normal'  || pname(i).includes('normal'))  { vn.quantity += qty; vn.amount += sub; }
+        else if (vtype === 'premium' || pname(i).includes('premium')) { vp.quantity += qty; vp.amount += sub; }
+      } else if (isKit(i)) {
+        kts.quantity += qty; kts.amount += sub;
+      } else {
+        oth.quantity += qty; oth.amount += sub;
+      }
+    }
+
+    const summary = {
+      date:         d,
+      total_orders: orders.length,
+      delivered:    delivered.length,
+      pending:      orders.filter(o => o.status === 'Pendiente').length,
+      in_transit:   orders.filter(o => o.status === 'En camino').length,
+      cancelled:    orders.filter(o => o.status === 'Cancelado').length,
+      revenue:      delivered.reduce((s, o) => s + (o.total || 0), 0),
+      balloons_10:  b10,
+      balloons_45:  b45,
+      balloons_10_normal:  b10n,
+      balloons_10_premium: b10p,
+      valvulas_normal_individuales:  vn,
+      valvulas_premium_individuales: vp,
+      kits:          kts,
+      otros_productos: oth,
+      by_brand: Object.entries(brandMap).map(([brand, quantity]) => ({ brand, quantity })),
+      // H5: dynamic — reflects whatever payment methods appear in delivered orders,
+      // no hardcoded list means no missing methods and no phantom Plin entries.
+      by_payment: delivered.reduce((acc, o) => {
+        const pm = o.payment_method || 'Sin método';
+        acc[pm] = (acc[pm] || 0) + (o.total || 0);
+        return acc;
+      }, {}),
+      by_rider: Object.values(
+        delivered.reduce((acc, o) => {
+          const k = o.rider_name || 'Sin asignar';
+          if (!acc[k]) acc[k] = { rider_name: k, orders: 0, revenue: 0, balloons: 0 };
+          acc[k].orders++;
+          acc[k].revenue  += o.total || 0;
+          acc[k].balloons += deliveredItems.filter(i => i.order_id === o.id && isBalloon(i))
+                                           .reduce((s, i) => s + (i.quantity || 0), 0);
+          return acc;
+        }, {})
+      ),
+    };
+
+    res.json({ summary, orders });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
