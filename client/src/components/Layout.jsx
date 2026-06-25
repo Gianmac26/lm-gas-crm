@@ -1,14 +1,15 @@
 import React from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, ShoppingBag, BarChart2, Settings, Truck } from 'lucide-react';
+import { LayoutDashboard, Users, ShoppingBag, BarChart2, Settings, Truck, MessageSquare } from 'lucide-react';
 
 const NAV = [
-  { to: '/dashboard', icon: LayoutDashboard, label: 'Inicio' },
-  { to: '/clients',   icon: Users,           label: 'Clientes' },
-  { to: '/orders',    icon: ShoppingBag,     label: 'Pedidos' },
-  { to: '/riders',    icon: Truck,           label: 'Moto' },
-  { to: '/reports',   icon: BarChart2,       label: 'Reportes' },
-  { to: '/config',    icon: Settings,        label: 'Config' },
+  { to: '/dashboard',     icon: LayoutDashboard, label: 'Inicio' },
+  { to: '/clients',       icon: Users,           label: 'Clientes' },
+  { to: '/orders',        icon: ShoppingBag,     label: 'Pedidos' },
+  { to: '/riders',        icon: Truck,           label: 'Moto' },
+  { to: '/conversations', icon: MessageSquare,   label: 'Bandeja' },
+  { to: '/reports',       icon: BarChart2,       label: 'Reportes' },
+  { to: '/config',        icon: Settings,        label: 'Config' },
 ];
 
 export default function Layout() {
@@ -20,7 +21,8 @@ export default function Layout() {
     if (loc.pathname.startsWith('/orders'))    return 'Pedidos';
     if (loc.pathname.startsWith('/riders'))    return 'Motorizados';
     if (loc.pathname.startsWith('/reports'))   return 'Reportes';
-    if (loc.pathname.startsWith('/config'))    return 'Configuración';
+    if (loc.pathname.startsWith('/config'))         return 'Configuración';
+    if (loc.pathname.startsWith('/conversations')) return 'Bandeja';
     return 'L&M Gas';
   };
 
@@ -40,7 +42,7 @@ export default function Layout() {
 
       {/* Bottom navigation */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 pb-safe">
-        <div className="max-w-2xl mx-auto grid grid-cols-6 h-16">
+        <div className="max-w-2xl mx-auto grid grid-cols-7 h-16">
           {NAV.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}

@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { clients, orders as ordersApi } from '../api.js';
+import { clients, orders as ordersApi, conversations as conversationsApi } from '../api.js';
 import {
   Phone, MessageCircle, MapPin, Edit, Trash2, Plus,
-  Star, Package, Clock, ChevronLeft, AlertTriangle
+  Star, Package, Clock, ChevronLeft, AlertTriangle, MessageSquare
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -25,9 +25,26 @@ export default function ClientDetail() {
   const nav = useNavigate();
   const [client, setClient] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [conversation, setConversation] = useState(null);
 
   useEffect(() => {
-    clients.get(id).then(setClient).catch(() => toast.error('Error al cargar cliente')).finally(() => setLoading(false));
+    clients.get(id)
+      .then(c => {
+        setClient(c);
+        const q = c.phone_normalized || c.phone;
+        if (q) {
+          conversationsApi.list({ q, limit: 5 })
+            .then(data => {
+              const match = (data.conversations || []).find(
+                cv => cv.client_id === c.id || cv.phone_normalized === c.phone_normalized
+              );
+              if (match) setConversation(match);
+            })
+            .catch(() => {});
+        }
+      })
+      .catch(() => toast.error('Error al cargar cliente'))
+      .finally(() => setLoading(false));
   }, [id]);
 
   const handleDelete = async () => {
@@ -123,6 +140,14 @@ export default function ClientDetail() {
               <MessageCircle size={16} /> WhatsApp
             </a>
           </div>
+        )}
+        {conversation && (
+          <button
+            onClick={() => nav(`/conversations/${conversation.id}`)}
+            className="w-full flex items-center justify-center gap-2 bg-orange-500 text-white rounded-xl py-3 font-semibold text-sm active:bg-orange-600 mt-2"
+          >
+            <MessageSquare size={16} /> Abrir conversación en CRM
+          </button>
         )}
       </div>
 

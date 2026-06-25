@@ -51,4 +51,11 @@ export const config = {
   update: (data) => api.put('/config', data).then(r => r.data),
 };
 
+export const conversations = {
+  list:       (params)       => api.get('/conversations', { params }).then(r => r.data),
+  getMessages:(id, params)   => api.get(`/conversations/${id}/messages`, { params }).then(r => r.data),
+  send:       (id, data)     => api.post(`/conversations/${id}/messages`, data).then(r => r.data),
+  markRead:   (id)           => api.patch(`/conversations/${id}/read`).then(r => r.data),
+};
+
 export default api;
