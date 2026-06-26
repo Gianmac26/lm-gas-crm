@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { clients } from '../api.js';
+import { useApp } from '../App.jsx';
 import { ChevronLeft, Save } from 'lucide-react';
 import toast from 'react-hot-toast';
+
+const DEFAULT_ZONES = 'San Borja,Surco,Miraflores,San Luis,San Isidro,Otra';
 
 const EMPTY = {
   name: '', address: '', reference: '', zone: 'San Borja', phone: '',
@@ -17,6 +20,15 @@ export default function ClientForm() {
   const isEdit = Boolean(id);
   const [form, setForm] = useState({ ...EMPTY, name: sp.get('name') || '' });
   const [saving, setSaving] = useState(false);
+  const { cfg } = useApp();
+
+  // Zonas configurables desde Config; incluye la zona actual del cliente por si
+  // ya no está en la lista (clientes antiguos).
+  const zones = (() => {
+    const list = (cfg?.zones || DEFAULT_ZONES).split(',').map(s => s.trim()).filter(Boolean);
+    if (form.zone && !list.includes(form.zone)) list.push(form.zone);
+    return list;
+  })();
 
   useEffect(() => {
     if (isEdit) clients.get(id).then(c => setForm({ ...c, is_vip: Boolean(c.is_vip) }));
@@ -65,7 +77,7 @@ export default function ClientForm() {
         <div>
           <label className="label">Zona</label>
           <select className="input" value={form.zone} onChange={e => set('zone', e.target.value)}>
-            {['San Borja','Surco','Miraflores','Otra'].map(z => <option key={z}>{z}</option>)}
+            {zones.map(z => <option key={z}>{z}</option>)}
           </select>
         </div>
       </div>
