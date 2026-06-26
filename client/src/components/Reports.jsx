@@ -20,7 +20,7 @@ function dateRange(daysFrom, daysTo = 0) {
 }
 
 export default function Reports() {
-  const [tab, setTab]           = useState('ventas');
+  const [tab, setTab]           = useState('diario');
   const [period, setPeriod]     = useState(1); // this week
   const [inactiveDays, setInactiveDays] = useState(7);
   const [sales, setSales]       = useState([]);
@@ -81,8 +81,7 @@ export default function Reports() {
   };
 
   const TABS = [
-    { id: 'diario',    label: 'Diario',    icon: TrendingUp },
-    { id: 'ventas',    label: 'Ventas',    icon: TrendingUp },
+    { id: 'diario',    label: 'Ventas',    icon: TrendingUp },
     { id: 'zonas',     label: 'Zonas',     icon: MapPin },
     { id: 'productos', label: 'Productos', icon: Package },
     { id: 'motos',     label: 'Moto',      icon: Truck },
@@ -317,23 +316,6 @@ export default function Reports() {
                   ))}
                 </>
               ) : null}
-            </div>
-          )}
-
-          {/* VENTAS */}
-          {tab === 'ventas' && (
-            <div className="space-y-2">
-              {sales.length === 0 ? (
-                <div className="card p-6 text-center text-gray-400">Sin ventas en este período</div>
-              ) : sales.map((d, i) => (
-                <div key={i} className="card p-3 flex items-center justify-between">
-                  <div>
-                    <p className="font-semibold text-gray-800 dark:text-gray-200 text-sm">{d.period}</p>
-                    <p className="text-xs text-gray-400">{d.orders} pedidos · {d.balloons_10 + d.balloons_40} balones</p>
-                  </div>
-                  <span className="font-bold text-orange-500">{fmt(d.revenue)}</span>
-                </div>
-              ))}
             </div>
           )}
 
