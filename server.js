@@ -122,13 +122,29 @@ async function initDb() {
   const defaults = {
     pin: '1234', daily_goal: '80', price_10kg: '38', price_40kg: '120',
     price_water: '12', price_cleaning: '15',
-    zones: 'San Borja,Surco,Miraflores,Otra', dark_mode: 'false',
+    zones: 'San Borja,Surco,Miraflores,San Luis,San Isidro,Otra', dark_mode: 'false',
   };
   await Promise.all(
     Object.entries(defaults).map(([k, v]) =>
       db.execute({ sql: 'INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)', args: [k, v] })
     )
   );
+
+  // Asegurar que las zonas incluyan San Luis y San Isidro (preserva las existentes
+  // e inserta antes de "Otra"). Idempotente: solo agrega las que falten.
+  const zc = row(await db.execute({ sql: `SELECT value FROM config WHERE key='zones'`, args: [] }));
+  if (zc) {
+    const list = String(zc.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    let changed = false;
+    for (const d of ['San Luis', 'San Isidro']) {
+      if (!list.includes(d)) {
+        const oi = list.indexOf('Otra');
+        if (oi === -1) list.push(d); else list.splice(oi, 0, d);
+        changed = true;
+      }
+    }
+    if (changed) await db.execute({ sql: `UPDATE config SET value=? WHERE key='zones'`, args: [list.join(',')] });
+  }
 }
 
 // Ensure DB is ready before every request
@@ -2635,6 +2651,12 @@ app.get('/api/reports/daily-detail', async (req, res) => {
       }
     }
 
+    // Balones solicitados: total en todos los pedidos no cancelados (no solo entregados)
+    const activeOrderIds = new Set(orders.filter(o => o.status !== 'Cancelado').map(o => o.id));
+    const balloonsRequested = itemList
+      .filter(i => activeOrderIds.has(i.order_id) && isBalloon(i))
+      .reduce((s, i) => s + (i.quantity || 0), 0);
+
     const summary = {
       date:         d,
       total_orders: orders.length,
@@ -2645,6 +2667,7 @@ app.get('/api/reports/daily-detail', async (req, res) => {
       revenue:      delivered.reduce((s, o) => s + (o.total || 0), 0),
       balloons_10:  b10,
       balloons_45:  b45,
+      balloons_requested: balloonsRequested,
       balloons_10_normal:  b10n,
       balloons_10_premium: b10p,
       valvulas_normal_individuales:  vn,

@@ -154,9 +154,9 @@ export default function Reports() {
                     </div>
                     <div className="card p-3 text-center">
                       <div className="text-2xl font-bold text-blue-700 dark:text-blue-400">
-                        {dailyData.summary.balloons_10 + dailyData.summary.balloons_45}
+                        {dailyData.summary.balloons_requested ?? (dailyData.summary.balloons_10 + dailyData.summary.balloons_45)}
                       </div>
-                      <div className="text-xs text-gray-500">Balones entregados</div>
+                      <div className="text-xs text-gray-500">Balones solicitados</div>
                     </div>
                     <div className="card p-3 text-center">
                       <div className="text-xl font-bold text-green-600">{dailyData.summary.delivered}</div>
