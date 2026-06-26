@@ -165,8 +165,12 @@ async function getConfig() {
   return Object.fromEntries(result.rows.map(r => [r.key, r.value]));
 }
 
+// Zona horaria del negocio: Perú (UTC-5, sin horario de verano).
+// El servidor corre en UTC, así que restamos 5 h para obtener la fecha local.
+const PERU_TZ_OFFSET = '-5 hours';
+
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  return new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 function rows(result) { return result.rows; }
@@ -1479,7 +1483,7 @@ app.get('/api/dashboard', async (req, res) => {
             FROM orders o
             LEFT JOIN clients c ON o.client_id = c.id
             LEFT JOIN riders r ON o.rider_id = r.id
-            WHERE date(o.created_at) = ?`,
+            WHERE date(o.created_at, '-5 hours') = ?`,
       args: [today],
     }));
 
@@ -1488,7 +1492,7 @@ app.get('/api/dashboard', async (req, res) => {
     const items = rows(await db.execute({
       sql: `SELECT oi.* FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
-            WHERE date(o.created_at) = ? AND o.status = 'Entregado'`,
+            WHERE date(o.created_at, '-5 hours') = ? AND o.status = 'Entregado'`,
       args: [today],
     }));
 
@@ -1509,14 +1513,14 @@ app.get('/api/dashboard', async (req, res) => {
     const lastWeekItems = rows(await db.execute({
       sql: `SELECT oi.* FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
-            WHERE date(o.created_at) = ? AND o.status = 'Entregado'
+            WHERE date(o.created_at, '-5 hours') = ? AND o.status = 'Entregado'
               AND (oi.product = 'Balón 10kg' OR oi.product = 'Balón 40kg')`,
       args: [lastWeekStr],
     }));
     const balloonsLastWeek = lastWeekItems.reduce((s, i) => s + i.quantity, 0);
 
     const revenueLastWeekRow = row(await db.execute({
-      sql:  `SELECT COALESCE(SUM(total),0) as total FROM orders WHERE date(created_at) = ? AND status = 'Entregado'`,
+      sql:  `SELECT COALESCE(SUM(total),0) as total FROM orders WHERE date(created_at, '-5 hours') = ? AND status = 'Entregado'`,
       args: [lastWeekStr],
     }));
     const revenueLastWeek = revenueLastWeekRow?.total ?? 0;
@@ -1665,7 +1669,7 @@ app.get('/api/orders', async (req, res) => {
                FROM orders o
                LEFT JOIN clients c ON o.client_id = c.id
                LEFT JOIN riders r ON o.rider_id = r.id
-               WHERE date(o.created_at) = ?`;
+               WHERE date(o.created_at, '-5 hours') = ?`;
     const args = [d];
     if (rider_id) { sql += ` AND o.rider_id = ?`; args.push(rider_id); }
     if (status)   { sql += ` AND o.status = ?`;   args.push(status); }
@@ -2043,10 +2047,10 @@ app.get('/api/riders', async (req, res) => {
     // Run per-rider queries in parallel
     const result = await Promise.all(riderList.map(async rider => {
       const [todayOrdersRow, deliveredRow, weekItemsResult] = await Promise.all([
-        db.execute({ sql: `SELECT COUNT(*) as cnt FROM orders WHERE rider_id=? AND date(created_at)=?`,           args: [rider.id, today] }),
-        db.execute({ sql: `SELECT COUNT(*) as cnt FROM orders WHERE rider_id=? AND date(created_at)=? AND status='Entregado'`, args: [rider.id, today] }),
+        db.execute({ sql: `SELECT COUNT(*) as cnt FROM orders WHERE rider_id=? AND date(created_at, '-5 hours')=?`,           args: [rider.id, today] }),
+        db.execute({ sql: `SELECT COUNT(*) as cnt FROM orders WHERE rider_id=? AND date(created_at, '-5 hours')=? AND status='Entregado'`, args: [rider.id, today] }),
         db.execute({ sql: `SELECT oi.quantity FROM order_items oi JOIN orders o ON oi.order_id=o.id
-                           WHERE o.rider_id=? AND o.status='Entregado' AND date(o.created_at)>=?
+                           WHERE o.rider_id=? AND o.status='Entregado' AND date(o.created_at, '-5 hours')>=?
                              AND (oi.product='Balón 10kg' OR oi.product='Balón 40kg')`,
                     args: [rider.id, weekStr] }),
       ]);
@@ -2070,7 +2074,7 @@ app.get('/api/riders/:id', async (req, res) => {
     const todayOrders = rows(await db.execute({
       sql: `SELECT o.*, c.name as client_name, c.address as client_address FROM orders o
             LEFT JOIN clients c ON o.client_id=c.id
-            WHERE o.rider_id=? AND date(o.created_at)=? ORDER BY o.created_at DESC`,
+            WHERE o.rider_id=? AND date(o.created_at, '-5 hours')=? ORDER BY o.created_at DESC`,
       args: [rider.id, today],
     }));
     res.json({ ...rider, todayOrders });
@@ -2101,16 +2105,16 @@ app.get('/api/reports/sales', async (req, res) => {
     const toDate   = to || todayStr();
     // Build date grouping expression for the CTE
     let periodExpr;
-    if (group_by === 'week')       periodExpr = `strftime('%Y-W%W', created_at)`;
-    else if (group_by === 'month') periodExpr = `strftime('%Y-%m', created_at)`;
-    else                           periodExpr = `date(created_at)`;
+    if (group_by === 'week')       periodExpr = `strftime('%Y-W%W', created_at, '-5 hours')`;
+    else if (group_by === 'month') periodExpr = `strftime('%Y-%m', created_at, '-5 hours')`;
+    else                           periodExpr = `date(created_at, '-5 hours')`;
 
     // CTE ensures each order's total is counted exactly once (no LEFT JOIN multiplication)
     const sales = rows(await db.execute({
       sql: `WITH o_totals AS (
               SELECT id, total, ${periodExpr} AS period
               FROM orders
-              WHERE date(created_at) BETWEEN ? AND ? AND status = 'Entregado'
+              WHERE date(created_at, '-5 hours') BETWEEN ? AND ? AND status = 'Entregado'
             ),
             i_agg AS (
               SELECT order_id,
@@ -2143,7 +2147,7 @@ app.get('/api/reports/by-zone', async (req, res) => {
       sql: `WITH o_totals AS (
               SELECT o.id, o.total, o.client_id
               FROM orders o
-              WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
+              WHERE date(o.created_at, '-5 hours') BETWEEN ? AND ? AND o.status = 'Entregado'
             ),
             i_agg AS (
               SELECT order_id,
@@ -2171,7 +2175,7 @@ app.get('/api/reports/by-product', async (req, res) => {
     res.json(rows(await db.execute({
       sql: `SELECT oi.product, SUM(oi.quantity) as quantity, SUM(oi.subtotal) as revenue, AVG(oi.unit_price) as avg_price
             FROM order_items oi JOIN orders o ON oi.order_id=o.id
-            WHERE date(o.created_at) BETWEEN ? AND ? AND o.status='Entregado'
+            WHERE date(o.created_at, '-5 hours') BETWEEN ? AND ? AND o.status='Entregado'
             GROUP BY oi.product ORDER BY revenue DESC`,
       args: [fromDate, toDate],
     })));
@@ -2187,7 +2191,7 @@ app.get('/api/reports/by-rider', async (req, res) => {
       sql: `WITH o_totals AS (
               SELECT o.id, o.total, o.rider_id
               FROM orders o
-              WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
+              WHERE date(o.created_at, '-5 hours') BETWEEN ? AND ? AND o.status = 'Entregado'
             ),
             i_agg AS (
               SELECT order_id,
@@ -2216,7 +2220,7 @@ app.get('/api/reports/top-clients', async (req, res) => {
       sql: `WITH o_totals AS (
               SELECT o.id, o.total, o.client_id
               FROM orders o
-              WHERE date(o.created_at) BETWEEN ? AND ? AND o.status = 'Entregado'
+              WHERE date(o.created_at, '-5 hours') BETWEEN ? AND ? AND o.status = 'Entregado'
             ),
             i_agg AS (
               SELECT order_id,
@@ -2267,7 +2271,7 @@ app.get('/api/reports/avg-ticket', async (req, res) => {
     const fromDate = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const toDate   = to || todayStr();
     res.json(row(await db.execute({
-      sql:  `SELECT COALESCE(AVG(total),0) as avg_ticket, COUNT(*) as orders, COALESCE(SUM(total),0) as total FROM orders WHERE date(created_at) BETWEEN ? AND ? AND status='Entregado'`,
+      sql:  `SELECT COALESCE(AVG(total),0) as avg_ticket, COUNT(*) as orders, COALESCE(SUM(total),0) as total FROM orders WHERE date(created_at, '-5 hours') BETWEEN ? AND ? AND status='Entregado'`,
       args: [fromDate, toDate],
     })));
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -2566,8 +2570,8 @@ app.get('/api/inventory/movements', async (req, res) => {
     const args = [];
     if (product_id) { sql += ` AND m.product_id=?`; args.push(product_id); }
     if (variant_id) { sql += ` AND m.variant_id=?`; args.push(variant_id); }
-    if (from)       { sql += ` AND date(m.created_at) >= ?`; args.push(from); }
-    if (to)         { sql += ` AND date(m.created_at) <= ?`; args.push(to); }
+    if (from)       { sql += ` AND date(m.created_at, '-5 hours') >= ?`; args.push(from); }
+    if (to)         { sql += ` AND date(m.created_at, '-5 hours') <= ?`; args.push(to); }
     sql += ` ORDER BY m.created_at DESC LIMIT ?`;
     args.push(lim);
     res.json(rows(await db.execute({ sql, args })));
@@ -2591,7 +2595,7 @@ app.get('/api/reports/daily-detail', async (req, res) => {
             LEFT JOIN clients c ON o.client_id = c.id
             LEFT JOIN riders r ON o.rider_id = r.id
             LEFT JOIN payments p ON p.order_id = o.id
-            WHERE date(o.created_at) = ? ORDER BY o.created_at`,
+            WHERE date(o.created_at, '-5 hours') = ? ORDER BY o.created_at`,
       args: [d],
     }));
 

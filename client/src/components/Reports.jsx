@@ -13,10 +13,16 @@ const PERIODS = [
   { label: 'Este mes',   from: 29, to: 0 },
 ];
 
+// Fecha local de Perú (UTC-5) como 'YYYY-MM-DD'. El servidor agrupa por hora
+// de Perú, así que los rangos del cliente deben usar la misma base.
+function peruDateStr(daysAgo = 0) {
+  const d = new Date(Date.now() - 5 * 3600 * 1000);
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  return d.toISOString().slice(0, 10);
+}
+
 function dateRange(daysFrom, daysTo = 0) {
-  const f = new Date(); f.setDate(f.getDate() - daysFrom);
-  const t = new Date(); t.setDate(t.getDate() - daysTo);
-  return { from: f.toISOString().slice(0,10), to: t.toISOString().slice(0,10) };
+  return { from: peruDateStr(daysFrom), to: peruDateStr(daysTo) };
 }
 
 export default function Reports() {
@@ -32,7 +38,7 @@ export default function Reports() {
   const [debts, setDebts]       = useState([]);
   const [avgTicket, setAvgTicket] = useState({});
   const [loading, setLoading]   = useState(false);
-  const [dailyDate, setDailyDate] = useState(() => new Date().toISOString().slice(0,10));
+  const [dailyDate, setDailyDate] = useState(() => peruDateStr());
   const [dailyData, setDailyData] = useState(null);
   const [dailyLoading, setDailyLoading] = useState(false);
 
