@@ -8,21 +8,45 @@ function fmtD(n)   { return (n||0).toFixed(0); }
 function pct(a, b) { if (!b) return '—'; return `${((a/b)*100).toFixed(0)}%`; }
 
 const PERIODS = [
-  { label: 'Hoy',        from: 0,  to: 0 },
-  { label: 'Esta semana',from: 6,  to: 0 },
-  { label: 'Este mes',   from: 29, to: 0 },
+  { label: 'Hoy' },
+  { label: 'Esta semana' },
+  { label: 'Este mes' },
 ];
 
-// Fecha local de Perú (UTC-5) como 'YYYY-MM-DD'. El servidor agrupa por hora
-// de Perú, así que los rangos del cliente deben usar la misma base.
+// Fecha cuyos campos UTC representan la hora local de Perú (UTC-5). El servidor
+// agrupa por hora de Perú, así que los rangos del cliente usan la misma base.
+function peruNow() {
+  return new Date(Date.now() - 5 * 3600 * 1000);
+}
+
 function peruDateStr(daysAgo = 0) {
-  const d = new Date(Date.now() - 5 * 3600 * 1000);
+  const d = peruNow();
   d.setUTCDate(d.getUTCDate() - daysAgo);
   return d.toISOString().slice(0, 10);
 }
 
-function dateRange(daysFrom, daysTo = 0) {
-  return { from: peruDateStr(daysFrom), to: peruDateStr(daysTo) };
+// Semana actual: lunes a domingo.
+function weekRange() {
+  const base = peruNow();
+  const dow = base.getUTCDay();               // 0=Dom .. 6=Sáb
+  const sinceMon = dow === 0 ? 6 : dow - 1;
+  const mon = peruNow(); mon.setUTCDate(base.getUTCDate() - sinceMon);
+  const sun = peruNow(); sun.setUTCDate(base.getUTCDate() - sinceMon + 6);
+  return { from: mon.toISOString().slice(0, 10), to: sun.toISOString().slice(0, 10) };
+}
+
+// Mes actual: día 1 al último día.
+function monthRange() {
+  const d = peruNow();
+  const first = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+  const last  = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
+  return { from: first.toISOString().slice(0, 10), to: last.toISOString().slice(0, 10) };
+}
+
+function fmtDM(iso) {
+  if (!iso) return '';
+  const [y, m, day] = iso.split('-');
+  return `${day}/${m}/${y}`;
 }
 
 export default function Reports() {
@@ -42,14 +66,17 @@ export default function Reports() {
   const [dailyData, setDailyData] = useState(null);
   const [dailyLoading, setDailyLoading] = useState(false);
 
-  const range = dateRange(PERIODS[period].from, PERIODS[period].to);
+  // Rango según el período: Hoy = el día elegido; semana = lun–dom; mes = 1–fin.
+  const range = period === 0 ? { from: dailyDate, to: dailyDate }
+              : period === 1 ? weekRange()
+              : monthRange();
 
   const loadAll = async () => {
     setLoading(true);
     try {
       const params = range;
       const [s, z, p, r, tc, i, d, a] = await Promise.all([
-        reports.sales({ ...params, group_by: PERIODS[period].from >= 29 ? 'day' : 'day' }),
+        reports.sales({ ...params, group_by: 'day' }),
         reports.byZone(params),
         reports.byProduct(params),
         reports.byRider(params),
@@ -64,7 +91,7 @@ export default function Reports() {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { loadAll(); }, [period, inactiveDays]);
+  useEffect(() => { loadAll(); }, [period, inactiveDays, dailyDate]);
 
   const loadDaily = async (date) => {
     setDailyLoading(true);
@@ -75,7 +102,7 @@ export default function Reports() {
     finally { setDailyLoading(false); }
   };
 
-  useEffect(() => { if (tab === 'diario') loadDaily(dailyDate); }, [tab, dailyDate]);
+  useEffect(() => { if (tab === 'diario' && period === 0) loadDaily(dailyDate); }, [tab, period, dailyDate]);
 
   const totalRevenue  = sales.reduce((s, d) => s + d.revenue, 0);
   const totalBalloons = sales.reduce((s, d) => s + d.balloons_10 + d.balloons_40, 0);
@@ -139,9 +166,11 @@ export default function Reports() {
         <div className="card h-40 animate-pulse bg-gray-100 dark:bg-gray-800" />
       ) : (
         <>
-          {/* DIARIO */}
+          {/* VENTAS */}
           {tab === 'diario' && (
             <div className="space-y-3">
+              {period === 0 ? (
+              <>
               <input
                 type="date" className="input"
                 value={dailyDate}
@@ -322,6 +351,25 @@ export default function Reports() {
                   ))}
                 </>
               ) : null}
+              </>
+              ) : (
+              <>
+                <div className="card p-3 text-center text-sm font-medium text-gray-600 dark:text-gray-300">
+                  {fmtDM(range.from)} — {fmtDM(range.to)}
+                </div>
+                {sales.length === 0 ? (
+                  <div className="card p-6 text-center text-gray-400">Sin ventas en este período</div>
+                ) : sales.map((d, i) => (
+                  <div key={i} className="card p-3 flex items-center justify-between">
+                    <div>
+                      <p className="font-semibold text-gray-800 dark:text-gray-200 text-sm">{fmtDM(d.period)}</p>
+                      <p className="text-xs text-gray-400">{d.orders} pedidos · {d.balloons_10 + d.balloons_40} balones</p>
+                    </div>
+                    <span className="font-bold text-orange-500">{fmt(d.revenue)}</span>
+                  </div>
+                ))}
+              </>
+              )}
             </div>
           )}
 
