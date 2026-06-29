@@ -122,7 +122,7 @@ async function initDb() {
   const defaults = {
     pin: '1234', daily_goal: '80', price_10kg: '38', price_40kg: '120',
     price_water: '12', price_cleaning: '15',
-    zones: 'San Borja,Surco,Miraflores,San Luis,San Isidro,Otra', dark_mode: 'false',
+    zones: 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra', dark_mode: 'false',
   };
   await Promise.all(
     Object.entries(defaults).map(([k, v]) =>
@@ -142,6 +142,17 @@ async function initDb() {
         if (oi === -1) list.push(d); else list.splice(oi, 0, d);
         changed = true;
       }
+    }
+    // Surquillo: insertar justo después de "Surco" (su lugar alfabético).
+    if (!list.includes('Surquillo')) {
+      const si = list.indexOf('Surco');
+      if (si !== -1) {
+        list.splice(si + 1, 0, 'Surquillo');
+      } else {
+        const oi = list.indexOf('Otra');
+        if (oi === -1) list.push('Surquillo'); else list.splice(oi, 0, 'Surquillo');
+      }
+      changed = true;
     }
     if (changed) await db.execute({ sql: `UPDATE config SET value=? WHERE key='zones'`, args: [list.join(',')] });
   }
@@ -1569,6 +1580,66 @@ app.get('/api/clients', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Exportar clientes a Excel (.xlsx). Respeta los mismos filtros que el listado.
+// Debe ir ANTES de '/api/clients/:id' para que "export" no se tome como id.
+app.get('/api/clients/export', async (req, res) => {
+  try {
+    const { q, zone, type } = req.query;
+    let sql = `SELECT c.*, (SELECT MAX(created_at) FROM orders WHERE client_id = c.id) as last_order
+               FROM clients c WHERE 1=1`;
+    const args = [];
+    if (q)    { sql += ` AND (c.name LIKE ? OR c.address LIKE ? OR c.phone LIKE ?)`; const p = `%${q}%`; args.push(p, p, p); }
+    if (zone) { sql += ` AND c.zone = ?`;  args.push(zone); }
+    if (type) { sql += ` AND c.type = ?`;  args.push(type); }
+    sql += ` ORDER BY c.name ASC`;
+    const data = rows(await db.execute({ sql, args }));
+
+    // Fechas en hora local de Perú (UTC-5), solo día.
+    const peruDate = (v) => {
+      if (!v) return '';
+      const d = new Date(new Date(v).getTime() - 5 * 3600 * 1000);
+      return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+    };
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Clientes');
+    ws.columns = [
+      { header: 'Nombre',                  key: 'name',              width: 24 },
+      { header: 'Teléfono',                key: 'phone',             width: 14 },
+      { header: 'Dirección',               key: 'address',           width: 28 },
+      { header: 'Referencia',              key: 'reference',         width: 24 },
+      { header: 'Zona',                    key: 'zone',              width: 14 },
+      { header: 'Tipo de cliente',         key: 'type',              width: 16 },
+      { header: 'Tipo de balón preferido', key: 'preferred_balloon', width: 20 },
+      { header: 'Frecuencia de compra',    key: 'frequency',         width: 20 },
+      { header: 'Último pedido',           key: 'last_order',        width: 14 },
+      { header: 'Deuda pendiente',         key: 'debt',              width: 14 },
+      { header: 'Notas',                   key: 'notes',             width: 30 },
+      { header: 'Fecha de registro',       key: 'created_at',        width: 16 },
+    ];
+    data.forEach(c => ws.addRow({
+      name:              c.name || '',
+      phone:             c.phone || '',
+      address:           c.address || '',
+      reference:         c.reference || '',
+      zone:              c.zone || '',
+      type:              c.type || '',
+      preferred_balloon: c.preferred_balloon || '',
+      frequency:         c.purchase_frequency || '',
+      last_order:        peruDate(c.last_order),
+      debt:              c.debt || 0,
+      notes:             c.notes || '',
+      created_at:        peruDate(c.created_at),
+    }));
+    ws.getRow(1).font = { bold: true };
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="clientes_lm_gas_${todayStr()}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/clients/:id', async (req, res) => {
   try {
     const client = row(await db.execute({ sql: 'SELECT * FROM clients WHERE id = ?', args: [req.params.id] }));
@@ -1867,10 +1938,18 @@ async function validateAndEnrichItems(items, catalogVersion, executor = db) {
 
 app.post('/api/orders', async (req, res) => {
   try {
-    const { client_id, rider_id, payment_method, notes, items, catalog_version } = req.body;
+    const { client_id, rider_id, payment_method, notes, items, catalog_version, order_date } = req.body;
     const cv = catalog_version === 1 ? 1 : 0;
 
     if (!items || !items.length) return res.status(400).json({ error: 'El pedido debe tener al menos un ítem' });
+
+    // Fecha manual opcional: si viene y es válida se usa; si no, se deja el
+    // CURRENT_TIMESTAMP por defecto de la tabla.
+    let createdAt = null;
+    if (order_date) {
+      const dt = new Date(order_date);
+      if (!isNaN(dt.getTime())) createdAt = dt.toISOString();
+    }
 
     // Open transaction first so catalog reads and writes share the same snapshot (M1: TOCTOU fix)
     const tx = await db.transaction('write');
@@ -1879,8 +1958,12 @@ app.post('/api/orders', async (req, res) => {
       const total = enriched.reduce((s, i) => s + i.quantity * i.unit_price, 0);
 
       const r = await tx.execute({
-        sql:  'INSERT INTO orders (client_id, rider_id, payment_method, notes, total, catalog_version) VALUES (?,?,?,?,?,?)',
-        args: [client_id ?? null, rider_id ?? null, payment_method || 'Efectivo', notes ?? null, total, cv],
+        sql:  createdAt
+          ? 'INSERT INTO orders (client_id, rider_id, payment_method, notes, total, catalog_version, created_at) VALUES (?,?,?,?,?,?,?)'
+          : 'INSERT INTO orders (client_id, rider_id, payment_method, notes, total, catalog_version) VALUES (?,?,?,?,?,?)',
+        args: createdAt
+          ? [client_id ?? null, rider_id ?? null, payment_method || 'Efectivo', notes ?? null, total, cv, createdAt]
+          : [client_id ?? null, rider_id ?? null, payment_method || 'Efectivo', notes ?? null, total, cv],
       });
       const orderId = lastId(r);
       for (const item of enriched) {

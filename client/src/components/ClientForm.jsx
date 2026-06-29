@@ -5,7 +5,7 @@ import { useApp } from '../App.jsx';
 import { ChevronLeft, Save } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-const DEFAULT_ZONES = 'San Borja,Surco,Miraflores,San Luis,San Isidro,Otra';
+const DEFAULT_ZONES = 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra';
 
 const EMPTY = {
   name: '', address: '', reference: '', zone: 'San Borja', phone: '',

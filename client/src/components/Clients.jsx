@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { clients } from '../api.js';
-import { Plus, Search, Star, ChevronRight, MapPin, Users2 } from 'lucide-react';
+import { Plus, Search, Star, ChevronRight, MapPin, Users2, Download } from 'lucide-react';
 
-const ZONES = ['Todas', 'San Borja', 'Surco', 'Miraflores', 'Otra'];
+const ZONES = ['Todas', 'San Borja', 'Surco', 'Surquillo', 'Miraflores', 'Otra'];
 const TYPES = ['Todos', 'Residencial', 'Negocio'];
 
 function daysAgo(dateStr) {
@@ -36,6 +36,14 @@ export default function Clients() {
   }, [q, zone, type]);
 
   useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [load]);
+
+  const exportExcel = () => {
+    const params = {};
+    if (q) params.q = q;
+    if (zone) params.zone = zone;
+    if (type) params.type = type;
+    window.open(clients.exportUrl(params), '_blank');
+  };
 
   return (
     <div className="p-4 space-y-3">
@@ -82,9 +90,14 @@ export default function Clients() {
       {/* Count + add */}
       <div className="flex items-center justify-between">
         <p className="text-sm text-gray-500 dark:text-gray-400">{list.length} clientes</p>
-        <button onClick={() => nav('/clients/new')} className="btn-primary !py-2 !px-4 flex items-center gap-1.5 text-sm">
-          <Plus size={16} /> Nuevo
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={exportExcel} className="!py-2 !px-4 flex items-center gap-1.5 text-sm font-medium rounded-xl bg-green-600 text-white active:bg-green-700">
+            <Download size={16} /> Exportar Excel
+          </button>
+          <button onClick={() => nav('/clients/new')} className="btn-primary !py-2 !px-4 flex items-center gap-1.5 text-sm">
+            <Plus size={16} /> Nuevo
+          </button>
+        </div>
       </div>
 
       {/* Error */}

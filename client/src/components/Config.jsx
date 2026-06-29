@@ -11,7 +11,7 @@ export default function Config() {
     daily_goal: '80',
     price_10kg: '38', price_45kg: '120',
     price_water: '12', price_cleaning: '15',
-    zones: 'San Borja,Surco,Miraflores,San Luis,San Isidro,Otra',
+    zones: 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra',
   });
   const [showPin, setShowPin] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -24,7 +24,7 @@ export default function Config() {
       price_45kg:    c.price_45kg    || c.price_40kg || '120',
       price_water:   c.price_water   || '12',
       price_cleaning:c.price_cleaning|| '15',
-      zones:         c.zones         || 'San Borja,Surco,Miraflores,San Luis,San Isidro,Otra',
+      zones:         c.zones         || 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra',
     })));
   }, []);
 

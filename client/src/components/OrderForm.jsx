@@ -7,6 +7,14 @@ import toast from 'react-hot-toast';
 const PAYMENT_METHODS = ['Efectivo', 'Yape', 'Plin', 'Transferencias', 'T/C', 'Crédito'];
 const STATUSES        = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
 
+// Fecha y hora actuales en formato 'YYYY-MM-DDTHH:mm' para <input datetime-local>
+// (usa la hora local del navegador, que para el usuario es Perú).
+function nowLocalDateTime() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 // ── Legacy PRODUCTS list (fallback only) ──────────────────────────────────────
 const LEGACY_PRODUCTS = ['Balón 10kg', 'Balón 40kg', 'Agua bidón 20L', 'Producto de limpieza'];
 
@@ -301,6 +309,7 @@ export default function OrderForm() {
   const [available, setAvailable] = useState(null); // null=loading, []=no catalog
   const [catalogVersion, setCatalogVersion] = useState(1);
   const [showPicker, setShowPicker] = useState(false);
+  const [orderDate, setOrderDate] = useState(() => nowLocalDateTime());
   const [saving, setSaving]     = useState(false);
   const searchRef = useRef(null);
 
@@ -398,6 +407,7 @@ export default function OrderForm() {
           unit_price: parseFloat(i.unit_price) || 0,
         })),
       };
+      if (!isEdit && orderDate) payload.order_date = new Date(orderDate).toISOString();
       if (isEdit) { await ordersApi.update(id, payload); toast.success('Pedido actualizado'); }
       else        { await ordersApi.create(payload);     toast.success('Pedido registrado');  }
       nav('/orders');
@@ -467,6 +477,19 @@ export default function OrderForm() {
           </div>
         )}
       </div>
+
+      {/* Fecha del pedido (solo al crear) */}
+      {!isEdit && (
+        <div className="card p-4">
+          <label className="label">Fecha del pedido</label>
+          <input
+            type="datetime-local"
+            className="input"
+            value={orderDate}
+            onChange={e => setOrderDate(e.target.value)}
+          />
+        </div>
+      )}
 
       {/* Products */}
       <div className="card p-4 space-y-3">
