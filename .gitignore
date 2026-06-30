@@ -8,6 +8,10 @@ database/
 *.db-shm
 *.db-wal
 
+# Respaldos de la base (contienen datos personales de clientes — NO subir)
+CRM-backups/
+*.sql
+
 # Variables de entorno (nunca subir claves reales)
 .env
 .env.local
