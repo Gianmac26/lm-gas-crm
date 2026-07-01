@@ -515,6 +515,18 @@ async function reconcileCatalogCategories() {
     });
     await db.execute({ sql: `INSERT OR IGNORE INTO config (key, value) VALUES ('catalog_45kg_activated','1')`, args: [] });
   }
+
+  // 6. Sembrar servicios de ejemplo (pendientes de precio) si no existen aún.
+  for (const name of ['Verificación de instalación', 'Colocación de válvula']) {
+    const exists = row(await db.execute({ sql: `SELECT id FROM products WHERE name=? LIMIT 1`, args: [name] }));
+    if (!exists) {
+      await db.execute({
+        sql: `INSERT INTO products (name, category, sale_price, tracks_inventory, active, created_at, updated_at)
+              VALUES (?, 'servicio', 0, 0, 0, ?, ?)`,
+        args: [name, now, now],
+      });
+    }
+  }
 }
 
 async function seedCatalog() {
@@ -547,6 +559,8 @@ async function seedCatalog() {
                     await insProduct('Válvula Premium',        'kit',      65,   true,  true);
                     await insProduct('Agua bidón 20L',         'accesorio',pWat, false, true);
                     await insProduct('Producto de limpieza',   'accesorio',pCln, false, true);
+                    await insProduct('Verificación de instalación', 'servicio', 0, false, false); // pendiente de precio
+                    await insProduct('Colocación de válvula',       'servicio', 0, false, false); // pendiente de precio
 
   // Balón 10 kg: cada marca × normal/premium → activo, precio = price_10kg
   // Balón 45 kg: cada marca (sin válvula) → activo, precio = price_45kg
@@ -1945,10 +1959,17 @@ app.post('/api/orders', async (req, res) => {
 
 app.put('/api/orders/:id', async (req, res) => {
   try {
-    const { status, rider_id, payment_method, notes, items } = req.body;
+    const { status, rider_id, payment_method, notes, items, order_date } = req.body;
     const oid      = req.params.id;
     const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [oid] }));
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
+
+    // Fecha manual opcional: permite corregir la fecha de un pedido ya registrado.
+    let newCreatedAt = null;
+    if (order_date) {
+      const dt = new Date(order_date);
+      if (!isNaN(dt.getTime())) newCreatedAt = dt.toISOString();
+    }
 
     // H4: validate status enum
     if (status !== undefined && !ALLOWED_ORDER_STATUSES.includes(status)) {
@@ -1983,8 +2004,12 @@ app.put('/api/orders/:id', async (req, res) => {
       const debtDelta      = newDebtContrib - oldDebtContrib;
 
       await tx.execute({
-        sql:  'UPDATE orders SET status=?, rider_id=?, payment_method=?, notes=?, total=?, delivered_at=?, catalog_version=? WHERE id=?',
-        args: [newStatus, rider_id ?? existing.rider_id, newPaymentMethod, notes ?? existing.notes, newTotal, deliveredAt, newCv, oid],
+        sql:  newCreatedAt
+          ? 'UPDATE orders SET status=?, rider_id=?, payment_method=?, notes=?, total=?, delivered_at=?, catalog_version=?, created_at=? WHERE id=?'
+          : 'UPDATE orders SET status=?, rider_id=?, payment_method=?, notes=?, total=?, delivered_at=?, catalog_version=? WHERE id=?',
+        args: newCreatedAt
+          ? [newStatus, rider_id ?? existing.rider_id, newPaymentMethod, notes ?? existing.notes, newTotal, deliveredAt, newCv, newCreatedAt, oid]
+          : [newStatus, rider_id ?? existing.rider_id, newPaymentMethod, notes ?? existing.notes, newTotal, deliveredAt, newCv, oid],
       });
       if (enriched) {
         await tx.execute({ sql: 'DELETE FROM order_items WHERE order_id = ?', args: [oid] });
@@ -2731,11 +2756,13 @@ app.get('/api/reports/daily-detail', async (req, res) => {
       by_rider: Object.values(
         delivered.reduce((acc, o) => {
           const k = o.rider_name || 'Sin asignar';
-          if (!acc[k]) acc[k] = { rider_name: k, orders: 0, revenue: 0, balloons: 0 };
+          if (!acc[k]) acc[k] = { rider_name: k, orders: 0, revenue: 0, balloons: 0, by_payment: {} };
           acc[k].orders++;
           acc[k].revenue  += o.total || 0;
           acc[k].balloons += deliveredItems.filter(i => i.order_id === o.id && isBalloon(i))
                                            .reduce((s, i) => s + (i.quantity || 0), 0);
+          const pm = o.payment_method || 'Sin método';
+          acc[k].by_payment[pm] = (acc[k].by_payment[pm] || 0) + (o.total || 0);
           return acc;
         }, {})
       ),

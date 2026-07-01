@@ -7,13 +7,14 @@ const CATEGORY_LABELS = {
   'balón':    '🔥 Balón de gas',
   'kit':      '🔧 Kit de Válvula',
   'accesorio':'💧 Productos',
+  'servicio': '🛠 Servicios',
   'otro':     'Otros',
 };
 
 // Order categories appear in, and which ones allow adding products inline
 // (key → default price suggested when adding a new product to that category).
-const CATEGORY_ORDER = ['balón', 'kit', 'accesorio', 'otro'];
-const ADDABLE = { 'kit': 65, 'accesorio': 0 };
+const CATEGORY_ORDER = ['balón', 'kit', 'accesorio', 'servicio', 'otro'];
+const ADDABLE = { 'kit': 65, 'accesorio': 0, 'servicio': 0 };
 
 function isPending(item) {
   return !item.active || (item.sale_price == null || item.sale_price <= 0);

@@ -25,13 +25,13 @@ function peruDateStr(daysAgo = 0) {
   return d.toISOString().slice(0, 10);
 }
 
-// Semana actual: lunes a domingo.
-function weekRange() {
+// Semana (lunes a domingo). offset=0 semana actual; offset=1 la anterior, etc.
+function weekRange(offset = 0) {
   const base = peruNow();
   const dow = base.getUTCDay();               // 0=Dom .. 6=Sáb
   const sinceMon = dow === 0 ? 6 : dow - 1;
-  const mon = peruNow(); mon.setUTCDate(base.getUTCDate() - sinceMon);
-  const sun = peruNow(); sun.setUTCDate(base.getUTCDate() - sinceMon + 6);
+  const mon = peruNow(); mon.setUTCDate(base.getUTCDate() - sinceMon - offset * 7);
+  const sun = peruNow(); sun.setUTCDate(base.getUTCDate() - sinceMon - offset * 7 + 6);
   return { from: mon.toISOString().slice(0, 10), to: sun.toISOString().slice(0, 10) };
 }
 
@@ -52,6 +52,7 @@ function fmtDM(iso) {
 export default function Reports() {
   const [tab, setTab]           = useState('diario');
   const [period, setPeriod]     = useState(1); // this week
+  const [weekOffset, setWeekOffset] = useState(0); // 0=semana actual, 1=anterior…
   const [inactiveDays, setInactiveDays] = useState(7);
   const [sales, setSales]       = useState([]);
   const [byZone, setByZone]     = useState([]);
@@ -68,7 +69,7 @@ export default function Reports() {
 
   // Rango según el período: Hoy = el día elegido; semana = lun–dom; mes = 1–fin.
   const range = period === 0 ? { from: dailyDate, to: dailyDate }
-              : period === 1 ? weekRange()
+              : period === 1 ? weekRange(weekOffset)
               : monthRange();
 
   const loadAll = async () => {
@@ -91,7 +92,7 @@ export default function Reports() {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { loadAll(); }, [period, inactiveDays, dailyDate]);
+  useEffect(() => { loadAll(); }, [period, inactiveDays, dailyDate, weekOffset]);
 
   const loadDaily = async (date) => {
     setDailyLoading(true);
@@ -127,7 +128,7 @@ export default function Reports() {
       {/* Period selector */}
       <div className="flex gap-2">
         {PERIODS.map((p, i) => (
-          <button key={i} onClick={() => setPeriod(i)}
+          <button key={i} onClick={() => { setPeriod(i); setWeekOffset(0); }}
             className={`flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors
               ${period === i ? 'bg-blue-900 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}>
             {p.label}
@@ -221,12 +222,23 @@ export default function Reports() {
                       <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm mb-2">Por motorizado</h4>
                       <div className="space-y-2">
                         {dailyData.summary.by_rider.map((r, i) => (
-                          <div key={i} className="flex items-center justify-between text-sm">
-                            <div>
-                              <span className="font-semibold text-gray-800 dark:text-gray-200">{r.rider_name}</span>
-                              <span className="text-gray-400 text-xs ml-2">{r.orders} pedidos · {r.balloons} balones</span>
+                          <div key={i} className="border-b border-gray-100 dark:border-gray-700 last:border-0 pb-2 last:pb-0">
+                            <div className="flex items-center justify-between text-sm">
+                              <div>
+                                <span className="font-semibold text-gray-800 dark:text-gray-200">{r.rider_name}</span>
+                                <span className="text-gray-400 text-xs ml-2">{r.orders} pedidos · {r.balloons} balones</span>
+                              </div>
+                              <span className="font-bold text-orange-500">{fmt(r.revenue)}</span>
                             </div>
-                            <span className="font-bold text-orange-500">{fmt(r.revenue)}</span>
+                            {r.by_payment && Object.keys(r.by_payment).length > 0 && (
+                              <div className="mt-1 pl-3 flex flex-wrap gap-x-3 gap-y-0.5">
+                                {Object.entries(r.by_payment).map(([pm, rev]) => (
+                                  <span key={pm} className="text-xs text-gray-500">
+                                    {pm}: <span className="font-medium text-gray-700 dark:text-gray-300">{fmt(rev)}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -354,9 +366,22 @@ export default function Reports() {
               </>
               ) : (
               <>
-                <div className="card p-3 text-center text-sm font-medium text-gray-600 dark:text-gray-300">
-                  {fmtDM(range.from)} — {fmtDM(range.to)}
-                </div>
+                {period === 1 ? (
+                  <div className="card p-2 flex items-center justify-between">
+                    <button type="button" onClick={() => setWeekOffset(o => o + 1)}
+                      className="px-3 py-1.5 rounded-lg text-blue-900 dark:text-blue-400 font-bold text-lg active:bg-gray-100 dark:active:bg-gray-700">‹</button>
+                    <div className="text-center">
+                      <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{fmtDM(range.from)} — {fmtDM(range.to)}</div>
+                      {weekOffset === 0 && <div className="text-[10px] text-gray-400">Semana actual</div>}
+                    </div>
+                    <button type="button" onClick={() => setWeekOffset(o => Math.max(0, o - 1))} disabled={weekOffset === 0}
+                      className={`px-3 py-1.5 rounded-lg font-bold text-lg ${weekOffset === 0 ? 'text-gray-300 dark:text-gray-600' : 'text-blue-900 dark:text-blue-400 active:bg-gray-100 dark:active:bg-gray-700'}`}>›</button>
+                  </div>
+                ) : (
+                  <div className="card p-3 text-center text-sm font-medium text-gray-600 dark:text-gray-300">
+                    {fmtDM(range.from)} — {fmtDM(range.to)}
+                  </div>
+                )}
                 {sales.length === 0 ? (
                   <div className="card p-6 text-center text-gray-400">Sin ventas en este período</div>
                 ) : sales.map((d, i) => (

@@ -7,13 +7,13 @@ import toast from 'react-hot-toast';
 const PAYMENT_METHODS = ['Efectivo', 'Yape', 'Plin', 'Transferencias', 'T/C', 'Crédito'];
 const STATUSES        = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
 
-// Fecha y hora actuales en formato 'YYYY-MM-DDTHH:mm' para <input datetime-local>
+// Una fecha en formato 'YYYY-MM-DDTHH:mm' para <input datetime-local>
 // (usa la hora local del navegador, que para el usuario es Perú).
-function nowLocalDateTime() {
-  const d = new Date();
+function toLocalDateTime(d = new Date()) {
   const pad = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+function nowLocalDateTime() { return toLocalDateTime(); }
 
 // ── Legacy PRODUCTS list (fallback only) ──────────────────────────────────────
 const LEGACY_PRODUCTS = ['Balón 10kg', 'Balón 40kg', 'Agua bidón 20L', 'Producto de limpieza'];
@@ -34,6 +34,7 @@ function emptyLegacyItem(prices) {
 const SIMPLE_CATEGORIES = [
   { key: 'kit',       label: 'Kit de válvula' },
   { key: 'accesorio', label: 'Productos' },
+  { key: 'servicio',  label: 'Servicios' },
 ];
 
 // Orden de marcas de balón en el selector.
@@ -328,6 +329,7 @@ export default function OrderForm() {
         setStatus(o.status || 'Pendiente');
         setNotes(o.notes || '');
         setCatalogVersion(o.catalog_version || 0);
+        if (o.created_at) setOrderDate(toLocalDateTime(new Date(o.created_at)));
         setItems(o.items?.map(i => ({ ...i })) || []);
         if (o.client_id) clients.get(o.client_id).then(setSelectedClient).catch(() => {});
       });
@@ -407,7 +409,7 @@ export default function OrderForm() {
           unit_price: parseFloat(i.unit_price) || 0,
         })),
       };
-      if (!isEdit && orderDate) payload.order_date = new Date(orderDate).toISOString();
+      if (orderDate) payload.order_date = new Date(orderDate).toISOString();
       if (isEdit) { await ordersApi.update(id, payload); toast.success('Pedido actualizado'); }
       else        { await ordersApi.create(payload);     toast.success('Pedido registrado');  }
       nav('/orders');
@@ -478,18 +480,16 @@ export default function OrderForm() {
         )}
       </div>
 
-      {/* Fecha del pedido (solo al crear) */}
-      {!isEdit && (
-        <div className="card p-4">
-          <label className="label">Fecha del pedido</label>
-          <input
-            type="datetime-local"
-            className="input"
-            value={orderDate}
-            onChange={e => setOrderDate(e.target.value)}
-          />
-        </div>
-      )}
+      {/* Fecha del pedido (editable al crear y al editar, incluso entregado) */}
+      <div className="card p-4">
+        <label className="label">Fecha del pedido</label>
+        <input
+          type="datetime-local"
+          className="input"
+          value={orderDate}
+          onChange={e => setOrderDate(e.target.value)}
+        />
+      </div>
 
       {/* Products */}
       <div className="card p-4 space-y-3">
