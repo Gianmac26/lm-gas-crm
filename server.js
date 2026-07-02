@@ -7,7 +7,7 @@ const {
 } = require('./lib/db');
 
 const app = express();
-const DEFAULT_WHATSAPP_API_VERSION = 'v20.0';
+const DEFAULT_WHATSAPP_API_VERSION = 'v21.0';
 const WHATSAPP_SEND_TIMEOUT_MS = 10000;
 const MAX_WHATSAPP_TEXT_LENGTH = 4096;
 
@@ -1181,6 +1181,17 @@ app.post('/api/auth/verify', async (req, res) => {
 });
 
 // ─── WHATSAPP CONVERSATIONS ──────────────────────────────────────────────────
+// Total de mensajes no leídos (para el badge de la Bandeja). Consulta liviana.
+app.get('/api/conversations/unread-count', async (req, res) => {
+  try {
+    const r = row(await db.execute({
+      sql: 'SELECT COALESCE(SUM(unread_count), 0) AS count FROM wa_conversations',
+      args: [],
+    }));
+    res.json({ count: Number(r?.count || 0) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/conversations', async (req, res) => {
   try {
     const pagination = parsePagination(req.query);
