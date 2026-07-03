@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { conversations as conversationsApi } from '../api.js';
-import { ChevronLeft, Send, Check, CheckCheck, Clock, AlertCircle, User } from 'lucide-react';
+import { ChevronLeft, Send, Check, CheckCheck, Clock, AlertCircle, User, Lock, Unlock } from 'lucide-react';
 
 const POLL_INTERVAL = 5000;
 
@@ -70,6 +70,7 @@ export default function ConversationDetail() {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
+  const [statusUpdating, setStatusUpdating] = useState(false);
 
   const messagesEndRef  = useRef(null);
   const chatRef         = useRef(null);
@@ -213,6 +214,17 @@ export default function ConversationDetail() {
     }
   };
 
+  const toggleStatus = async () => {
+    if (!conversation || statusUpdating) return;
+    const nextStatus = conversation.status === 'closed' ? 'open' : 'closed';
+    setStatusUpdating(true);
+    try {
+      const updated = await conversationsApi.setStatus(convId, nextStatus);
+      setConversation(updated);
+    } catch { /* no crítico, el estado local no cambia */ }
+    setStatusUpdating(false);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -258,6 +270,14 @@ export default function ConversationDetail() {
             <User size={14} /> Ficha
           </button>
         )}
+        <button
+          onClick={toggleStatus}
+          disabled={statusUpdating}
+          className="btn-ghost !py-2 !px-3 flex items-center gap-1.5 text-xs flex-shrink-0"
+        >
+          {conversation?.status === 'closed' ? <Unlock size={14} /> : <Lock size={14} />}
+          {conversation?.status === 'closed' ? 'Reabrir' : 'Cerrar'}
+        </button>
       </div>
 
       {/* Messages */}
