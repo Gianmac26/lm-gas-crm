@@ -1224,7 +1224,12 @@ app.get('/api/conversations', async (req, res) => {
                        FROM wa_messages m
                        WHERE m.conversation_id = wc.id
                        ORDER BY datetime(COALESCE(m.created_at, m.received_at)) DESC, m.id DESC
-                       LIMIT 1) as last_message_status
+                       LIMIT 1) as last_message_status,
+                      (SELECT m.type
+                       FROM wa_messages m
+                       WHERE m.conversation_id = wc.id
+                       ORDER BY datetime(COALESCE(m.created_at, m.received_at)) DESC, m.id DESC
+                       LIMIT 1) as last_message_type
                FROM wa_conversations wc
                LEFT JOIN clients c ON c.id = wc.client_id
                WHERE 1=1`;
