@@ -79,3 +79,31 @@ test('GET /api/conversations incluye last_message_type del último mensaje', asy
   assert.ok(conv, 'debe existir la conversación');
   assert.equal(conv.last_message_type, 'image');
 });
+
+test('PATCH /api/conversations/:id/status cierra y reabre una conversación', async () => {
+  const phone = '51922222222';
+  await sendInboundWhatsapp({ phone, contactName: 'Cerrar Test' });
+  const conv = await findConversationByPhone(phone);
+  assert.equal(conv.status, 'open');
+
+  const closed = await api('PATCH', `/api/conversations/${conv.id}/status`, { status: 'closed' });
+  assert.equal(closed.status, 200);
+  assert.equal(closed.data.status, 'closed');
+
+  const reopened = await api('PATCH', `/api/conversations/${conv.id}/status`, { status: 'open' });
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.data.status, 'open');
+});
+
+test('PATCH /api/conversations/:id/status rechaza un status inválido', async () => {
+  const phone = '51933333333';
+  await sendInboundWhatsapp({ phone, contactName: 'Invalido Test' });
+  const conv = await findConversationByPhone(phone);
+  const res = await api('PATCH', `/api/conversations/${conv.id}/status`, { status: 'archivado' });
+  assert.equal(res.status, 400);
+});
+
+test('PATCH /api/conversations/:id/status devuelve 404 si la conversación no existe', async () => {
+  const res = await api('PATCH', `/api/conversations/999999/status`, { status: 'closed' });
+  assert.equal(res.status, 404);
+});

@@ -1441,6 +1441,35 @@ app.post('/api/conversations/:id/messages', async (req, res) => {
   } catch (err) { return sendInternalError(res, 'Error enviando mensaje de WhatsApp:', err); }
 });
 
+app.patch('/api/conversations/:id/status', async (req, res) => {
+  try {
+    const conversationId = parsePositiveInteger(req.params.id);
+    if (!conversationId) return res.status(400).json({ error: 'id de conversación inválido' });
+
+    const status = req.body?.status;
+    if (!['open', 'closed'].includes(status)) {
+      return res.status(400).json({ error: "status debe ser 'open' o 'closed'" });
+    }
+
+    const conversation = row(await db.execute({
+      sql: 'SELECT id FROM wa_conversations WHERE id = ?',
+      args: [conversationId],
+    }));
+    if (!conversation) return res.status(404).json({ error: 'Conversación no encontrada' });
+
+    await db.execute({
+      sql: 'UPDATE wa_conversations SET status = ?, updated_at = ? WHERE id = ?',
+      args: [status, isoNow(), conversationId],
+    });
+
+    const updated = row(await db.execute({
+      sql: 'SELECT * FROM wa_conversations WHERE id = ?',
+      args: [conversationId],
+    }));
+    res.json(updated);
+  } catch (err) { return sendInternalError(res, 'Error actualizando estado de conversación:', err); }
+});
+
 app.patch('/api/conversations/:id/read', async (req, res) => {
   try {
     const conversationId = parsePositiveInteger(req.params.id);
