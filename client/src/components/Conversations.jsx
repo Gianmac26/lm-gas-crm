@@ -20,6 +20,20 @@ function displayName(c) {
   return c.client_name || c.contact_name || c.phone || c.phone_normalized || '—';
 }
 
+const MEDIA_LABELS = {
+  image: '📷 Foto',
+  video: '🎬 Video',
+  audio: '🎤 Nota de voz',
+  document: '📄 Documento',
+  sticker: '😀 Sticker',
+  location: '📍 Ubicación',
+  contacts: '👤 Contacto',
+};
+
+function mediaLabel(type) {
+  return MEDIA_LABELS[type] || '📎 Adjunto';
+}
+
 const FILTERS = [
   { key: 'all',    label: 'Todas' },
   { key: 'unread', label: 'No leídas' },
@@ -183,7 +197,9 @@ export default function Conversations() {
                       )}
                       {c.last_message_body
                         ? c.last_message_body
-                        : <span className="italic">Sin mensajes</span>}
+                        : c.last_message_type && c.last_message_type !== 'text'
+                          ? <span className="italic">{mediaLabel(c.last_message_type)}</span>
+                          : <span className="italic">Sin mensajes</span>}
                     </span>
                     {unread > 0 && (
                       <span className="flex-shrink-0 bg-orange-500 text-white text-[10px] font-bold rounded-full px-1.5 py-0.5 min-w-[18px] text-center leading-none">

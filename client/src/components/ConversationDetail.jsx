@@ -44,6 +44,20 @@ function getErrorText(code, fallback) {
   return ERROR_TEXT[code] || fallback || 'Error al enviar el mensaje. Intenta de nuevo.';
 }
 
+const MEDIA_LABELS = {
+  image: '📷 Foto',
+  video: '🎬 Video',
+  audio: '🎤 Nota de voz',
+  document: '📄 Documento',
+  sticker: '😀 Sticker',
+  location: '📍 Ubicación',
+  contacts: '👤 Contacto',
+};
+
+function mediaLabel(type) {
+  return MEDIA_LABELS[type] || '📎 Adjunto';
+}
+
 export default function ConversationDetail() {
   const { id } = useParams();
   const nav = useNavigate();
@@ -280,7 +294,9 @@ export default function ConversationDetail() {
                         : 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-sm rounded-bl-md border border-gray-100 dark:border-gray-600'
                       }`}
                     >
-                      <p className="whitespace-pre-wrap break-words leading-snug">{m.body}</p>
+                      <p className={`whitespace-pre-wrap break-words leading-snug ${!m.body && m.type !== 'text' ? 'italic opacity-80' : ''}`}>
+                        {m.body || (m.type && m.type !== 'text' ? mediaLabel(m.type) : '')}
+                      </p>
                       <div className={`flex items-center gap-1 mt-1 ${isOut ? 'justify-end' : 'justify-start'}`}>
                         <span className={`text-[10px] leading-none ${isOut ? 'text-orange-100' : 'text-gray-400 dark:text-gray-500'}`}>
                           {fmtTime(m.created_at || m.received_at)}
