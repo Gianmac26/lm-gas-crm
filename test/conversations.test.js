@@ -107,3 +107,14 @@ test('PATCH /api/conversations/:id/status devuelve 404 si la conversación no ex
   const res = await api('PATCH', `/api/conversations/999999/status`, { status: 'closed' });
   assert.equal(res.status, 404);
 });
+
+test('un mensaje entrante nuevo reabre una conversación cerrada', async () => {
+  const phone = '51944444444';
+  await sendInboundWhatsapp({ phone, contactName: 'Reabrir Test' });
+  const conv = await findConversationByPhone(phone);
+  await api('PATCH', `/api/conversations/${conv.id}/status`, { status: 'closed' });
+
+  await sendInboundWhatsapp({ phone, contactName: 'Reabrir Test', text: 'Otro mensaje' });
+  const reloaded = await findConversationByPhone(phone);
+  assert.equal(reloaded.status, 'open');
+});
