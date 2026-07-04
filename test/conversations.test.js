@@ -118,3 +118,44 @@ test('un mensaje entrante nuevo reabre una conversación cerrada', async () => {
   const reloaded = await findConversationByPhone(phone);
   assert.equal(reloaded.status, 'open');
 });
+
+test('POST /api/conversations/:id/template valida parámetros requeridos', async () => {
+  const phone = '51955555555';
+  await sendInboundWhatsapp({ phone, contactName: 'Plantilla Test' });
+  const conv = await findConversationByPhone(phone);
+
+  const res = await api('POST', `/api/conversations/${conv.id}/template`, {
+    template_language: 'es',
+    components: [],
+    body: 'Hola',
+    client_request_id: crypto.randomUUID(),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/conversations/:id/template devuelve 404 si la conversación no existe', async () => {
+  const res = await api('POST', `/api/conversations/999999/template`, {
+    template_name: 'reactivacion',
+    template_language: 'es',
+    components: [],
+    body: 'Hola',
+    client_request_id: crypto.randomUUID(),
+  });
+  assert.equal(res.status, 404);
+});
+
+test('POST /api/conversations/:id/template falla con WHATSAPP_CONFIG_MISSING si no hay credenciales', async () => {
+  const phone = '51966666666';
+  await sendInboundWhatsapp({ phone, contactName: 'Sin Config Test' });
+  const conv = await findConversationByPhone(phone);
+
+  const res = await api('POST', `/api/conversations/${conv.id}/template`, {
+    template_name: 'reactivacion',
+    template_language: 'es',
+    components: [],
+    body: 'Hola de nuevo',
+    client_request_id: crypto.randomUUID(),
+  });
+  assert.equal(res.status, 500);
+  assert.equal(res.data.error, 'WHATSAPP_CONFIG_MISSING');
+});

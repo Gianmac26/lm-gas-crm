@@ -1149,6 +1149,93 @@ async function sendWhatsappTextMessage({ to, body }) {
   }
 }
 
+async function sendWhatsappTemplateMessage({ to, templateName, templateLanguage, components }) {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const apiVersion = process.env.WHATSAPP_API_VERSION || DEFAULT_WHATSAPP_API_VERSION;
+
+  if (!accessToken || !phoneNumberId) {
+    return {
+      ok: false,
+      status: 500,
+      code: 'WHATSAPP_CONFIG_MISSING',
+      message: 'Configuración de WhatsApp incompleta.',
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WHATSAPP_SEND_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: templateLanguage },
+          components: components || [],
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (parseErr) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const metaError = payload?.error || {};
+      return {
+        ok: false,
+        status: 502,
+        code: metaError.code ? String(metaError.code) : `META_HTTP_${response.status}`,
+        message: sanitizeMetaErrorMessage(metaError.message || `WhatsApp respondió HTTP ${response.status}`),
+      };
+    }
+
+    const waMessageId = payload?.messages?.[0]?.id;
+    if (!waMessageId) {
+      return {
+        ok: false,
+        status: 502,
+        code: 'META_NO_MESSAGE_ID',
+        message: 'WhatsApp aceptó la solicitud, pero no devolvió un id de mensaje válido.',
+      };
+    }
+
+    return { ok: true, waMessageId };
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      return {
+        ok: false,
+        status: 504,
+        code: 'META_TIMEOUT',
+        message: 'WhatsApp no respondió dentro del tiempo esperado.',
+      };
+    }
+
+    return {
+      ok: false,
+      status: 502,
+      code: 'META_REQUEST_FAILED',
+      message: 'No se pudo contactar a WhatsApp.',
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // ─── WHATSAPP WEBHOOK ─────────────────────────────────────────────────────────
 // Verificación de Meta (GET)
 app.get('/webhook/whatsapp', (req, res) => {
@@ -1469,6 +1556,121 @@ app.patch('/api/conversations/:id/status', async (req, res) => {
     }));
     res.json(updated);
   } catch (err) { return sendInternalError(res, 'Error actualizando estado de conversación:', err); }
+});
+
+app.post('/api/conversations/:id/template', async (req, res) => {
+  try {
+    const conversationId = parsePositiveInteger(req.params.id);
+    if (!conversationId) return res.status(400).json({ error: 'id de conversación inválido' });
+
+    const templateName = typeof req.body?.template_name === 'string' ? req.body.template_name.trim() : '';
+    const templateLanguage = typeof req.body?.template_language === 'string' ? req.body.template_language.trim() : '';
+    const bodyText = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    const components = Array.isArray(req.body?.components) ? req.body.components : [];
+    const clientRequestId = typeof req.body?.client_request_id === 'string'
+      ? req.body.client_request_id.trim()
+      : '';
+
+    if (!templateName || !templateLanguage) {
+      return res.status(400).json({ error: 'template_name y template_language son requeridos' });
+    }
+    if (!bodyText) {
+      return res.status(400).json({ error: 'body debe ser un texto no vacío' });
+    }
+    if (!isValidClientRequestId(clientRequestId)) {
+      return res.status(400).json({ error: 'client_request_id debe ser un UUID válido' });
+    }
+
+    const existingMessage = await getMessageByClientRequestId(clientRequestId);
+    if (existingMessage) {
+      if (Number(existingMessage.conversation_id) !== conversationId) {
+        return res.status(409).json({
+          error: 'CLIENT_REQUEST_ID_CONFLICT',
+          message: 'client_request_id ya fue utilizado en otra conversación.',
+        });
+      }
+      return res.status(200).json({ message: existingMessage });
+    }
+
+    const conversation = row(await db.execute({
+      sql: 'SELECT * FROM wa_conversations WHERE id = ?',
+      args: [conversationId],
+    }));
+    if (!conversation) return res.status(404).json({ error: 'Conversación no encontrada' });
+
+    const phoneNormalized = normalizePhone(conversation.phone_normalized || conversation.phone);
+    if (!isValidWhatsappPhone(phoneNormalized)) {
+      return res.status(422).json({
+        error: 'INVALID_PHONE',
+        message: 'La conversación no tiene un teléfono normalizado válido.',
+      });
+    }
+
+    const createdAt = isoNow();
+    const insertResult = await db.execute({
+      sql: `INSERT OR IGNORE INTO wa_messages
+              (conversation_id, client_id, phone, phone_normalized, message, body, direction,
+               type, client_request_id, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'outbound', 'template', ?, 'queued', ?)`,
+      args: [
+        conversation.id,
+        conversation.client_id || null,
+        conversation.phone || phoneNormalized,
+        phoneNormalized,
+        bodyText,
+        bodyText,
+        clientRequestId,
+        createdAt,
+      ],
+    });
+
+    if (rowsAffected(insertResult) === 0) {
+      const duplicateMessage = await getMessageByClientRequestId(clientRequestId);
+      if (duplicateMessage && Number(duplicateMessage.conversation_id) === conversationId) {
+        return res.status(200).json({ message: duplicateMessage });
+      }
+      return res.status(409).json({
+        error: 'CLIENT_REQUEST_ID_CONFLICT',
+        message: 'client_request_id ya fue utilizado.',
+      });
+    }
+
+    const messageId = lastId(insertResult);
+    const metaResult = await sendWhatsappTemplateMessage({
+      to: phoneNormalized,
+      templateName,
+      templateLanguage,
+      components,
+    });
+
+    if (!metaResult.ok) {
+      const failedMessage = await markOutboundMessageFailed(messageId, metaResult.code, metaResult.message);
+      return res.status(metaResult.status || 502).json({
+        error: metaResult.code,
+        message: metaResult.message,
+        whatsapp_message: failedMessage,
+      });
+    }
+
+    const sentAt = isoNow();
+    await db.execute({
+      sql: `UPDATE wa_messages
+            SET status = 'sent',
+                wa_message_id = ?,
+                sent_at = ?
+            WHERE id = ?`,
+      args: [metaResult.waMessageId, sentAt, messageId],
+    });
+    await db.execute({
+      sql: `UPDATE wa_conversations
+            SET last_message_at = ?, updated_at = ?
+            WHERE id = ?`,
+      args: [sentAt, sentAt, conversation.id],
+    });
+
+    const sentMessage = await getOutboundMessage(messageId);
+    return res.status(201).json({ message: sentMessage });
+  } catch (err) { return sendInternalError(res, 'Error enviando plantilla de WhatsApp:', err); }
 });
 
 app.patch('/api/conversations/:id/read', async (req, res) => {
