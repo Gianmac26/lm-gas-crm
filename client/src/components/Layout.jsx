@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, ShoppingBag, BarChart2, Settings, Truck, MessageSquare, Package } from 'lucide-react';
+import { LayoutDashboard, Users, ShoppingBag, BarChart2, Settings, Truck, MessageSquare, Package, Megaphone } from 'lucide-react';
 import { conversations } from '../api.js';
 
 const NAV = [
@@ -9,6 +9,7 @@ const NAV = [
   { to: '/orders',        icon: ShoppingBag,     label: 'Pedidos' },
   { to: '/riders',        icon: Truck,           label: 'Moto' },
   { to: '/conversations', icon: MessageSquare,   label: 'Bandeja' },
+  { to: '/campaigns',     icon: Megaphone,       label: 'Campañas' },
   { to: '/catalog',       icon: Package,         label: 'Catálogo' },
   { to: '/reports',       icon: BarChart2,       label: 'Reportes' },
   { to: '/config',        icon: Settings,        label: 'Config' },
@@ -34,6 +35,7 @@ export default function Layout() {
     if (loc.pathname.startsWith('/reports'))   return 'Reportes';
     if (loc.pathname.startsWith('/config'))         return 'Configuración';
     if (loc.pathname.startsWith('/conversations')) return 'Bandeja';
+    if (loc.pathname.startsWith('/campaigns')) return 'Campañas';
     if (loc.pathname.startsWith('/catalog'))       return 'Catálogo';
     return 'L&M Gas';
   };

@@ -1702,6 +1702,243 @@ app.patch('/api/conversations/:id/read', async (req, res) => {
   } catch (err) { return sendInternalError(res, 'Error marcando conversación como leída:', err); }
 });
 
+// ─── CAMPAIGNS ────────────────────────────────────────────────────────────────
+const WABA_ID = '2445035232663854'; // L&M WABA ID
+
+app.get('/api/campaigns/templates', async (req, res) => {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!accessToken) {
+    return res.status(500).json({ error: 'WHATSAPP_ACCESS_TOKEN no está configurado.' });
+  }
+
+  try {
+    const url = `https://graph.facebook.com/v21.0/${WABA_ID}/message_templates?status=APPROVED&fields=name,components,category,language`;
+    const response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error('Error fetching templates from Meta:', errorData);
+      return res.status(response.status).json({ error: 'Error al obtener plantillas de Meta', details: errorData });
+    }
+
+    const { data } = await response.json();
+    const filteredTemplates = data
+      .filter(t => t.status === 'APPROVED' && String(t.language).startsWith('es'))
+      .map(({ name, category, language, components }) => ({ name, category, language, components }));
+
+    res.json(filteredTemplates);
+  } catch (err) {
+    return sendInternalError(res, 'Error al obtener plantillas de WhatsApp:', err);
+  }
+});
+
+app.get('/api/campaigns/eligible-clients', async (req, res) => {
+  try {
+    const { segment, zone, type } = req.query;
+    const segments = ['inactive_7', 'inactive_14', 'inactive_30', 'inactive_60', 'all'];
+    if (!segment || !segments.includes(segment)) {
+      return res.status(400).json({ error: `Query param 'segment' es requerido y debe ser uno de: ${segments.join(', ')}` });
+    }
+
+    let sql = `
+      WITH ClientLastOrder AS (
+        SELECT
+          client_id,
+          MAX(created_at) as last_order_date
+        FROM orders
+        GROUP BY client_id
+      )
+      SELECT
+        c.id,
+        c.name as nombre,
+        c.phone_normalized as telefono,
+        c.zone as zona,
+        c.type as tipo,
+        COALESCE(julianday('now') - julianday(clo.last_order_date), 9999) as dias_sin_pedir,
+        clo.last_order_date as fecha_ultimo_pedido
+      FROM clients c
+      LEFT JOIN ClientLastOrder clo ON c.id = clo.client_id
+      WHERE c.phone_normalized IS NOT NULL AND c.phone_normalized != ''
+    `;
+    const args = [];
+
+    switch (segment) {
+      case 'inactive_7': sql += ' AND dias_sin_pedir >= 7'; break;
+      case 'inactive_14': sql += ' AND dias_sin_pedir >= 14'; break;
+      case 'inactive_30': sql += ' AND dias_sin_pedir >= 30'; break;
+      case 'inactive_60': sql += ' AND dias_sin_pedir >= 60'; break;
+    }
+
+    if (zone && zone !== 'all') {
+      sql += ' AND c.zone = ?';
+      args.push(zone);
+    }
+    if (type && type !== 'all') {
+      sql += ' AND c.type = ?';
+      args.push(type);
+    }
+
+    sql += ' ORDER BY dias_sin_pedir DESC';
+
+    const clients = rows(await db.execute({ sql, args }));
+    res.json(clients);
+  } catch (err) {
+    return sendInternalError(res, 'Error obteniendo clientes elegibles:', err);
+  }
+});
+
+app.post('/api/campaigns/send', async (req, res) => {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+  if (!accessToken || !phoneNumberId) {
+    return res.status(500).json({ error: 'Configuración de WhatsApp incompleta.' });
+  }
+
+  const { template_name, template_language, client_ids, variable_mapping } = req.body;
+
+  if (!template_name || !template_language || !Array.isArray(client_ids) || !client_ids.length) {
+    return res.status(400).json({ error: 'Faltan parámetros requeridos: template_name, template_language, client_ids.' });
+  }
+
+  const campaign_id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const results = [];
+  let sent = 0;
+  let failed = 0;
+
+  const clientData = rows(await db.execute({
+    sql: `
+      WITH ClientLastOrder AS (
+        SELECT client_id, MAX(created_at) as last_order_date FROM orders GROUP BY client_id
+      )
+      SELECT
+        c.id,
+        c.name as nombre,
+        c.phone_normalized as telefono,
+        COALESCE(ROUND(julianday('now') - julianday(clo.last_order_date)), NULL) as dias_sin_pedir
+      FROM clients c
+      LEFT JOIN ClientLastOrder clo ON c.id = clo.client_id
+      WHERE c.id IN (${client_ids.map(() => '?').join(',')})`,
+    args: client_ids,
+  }));
+
+  const clientMap = new Map(clientData.map(c => [c.id, c]));
+
+  for (const clientId of client_ids) {
+    const client = clientMap.get(clientId);
+    if (!client || !client.telefono || !/^519\d{8}$/.test(client.telefono)) {
+      failed++;
+      results.push({ client_id: clientId, nombre: client?.nombre, status: 'failed', error: 'Número de teléfono inválido o ausente.' });
+      await db.execute({
+        sql: `INSERT INTO campaign_logs (campaign_id, client_id, telefono, template_name, status, error_message)
+              VALUES (?, ?, ?, ?, 'failed', ?)`,
+        args: [campaign_id, clientId, client?.telefono || 'N/A', template_name, 'Número de teléfono inválido o ausente.'],
+      });
+      continue;
+    }
+
+    const components = [];
+    if (variable_mapping && Object.keys(variable_mapping).length > 0) {
+        const bodyParams = Object.entries(variable_mapping)
+            .filter(([key, value]) => !isNaN(parseInt(key))) // filter only body variables
+            .map(([key, value]) => {
+                let text = value;
+                if (client[value]) {
+                    text = client[value];
+                }
+                return { type: 'text', text: String(text) };
+            });
+        if(bodyParams.length > 0){
+             components.push({
+                type: 'body',
+                parameters: bodyParams
+            });
+        }
+    }
+
+    const payload = {
+      messaging_product: 'whatsapp',
+      to: client.telefono,
+      type: 'template',
+      template: {
+        name: template_name,
+        language: { code: template_language },
+        components: components,
+      },
+    };
+
+    let status = 'pending', error_message = null;
+    try {
+      const response = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        status = 'sent';
+        sent++;
+      } else {
+        const errData = await response.json();
+        status = 'failed';
+        error_message = errData.error?.message || 'Error desconocido de la API de Meta.';
+        failed++;
+      }
+    } catch (err) {
+      status = 'failed';
+      error_message = err.message;
+      failed++;
+    }
+
+    results.push({ client_id: clientId, nombre: client.nombre, status, error: error_message });
+    await db.execute({
+      sql: `INSERT INTO campaign_logs (campaign_id, client_id, telefono, template_name, status, error_message)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [campaign_id, clientId, client.telefono, template_name, status, error_message],
+    });
+
+    // Espera de 200ms
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+
+  res.status(200).json({
+    campaign_id,
+    total: client_ids.length,
+    sent,
+    failed,
+    results,
+  });
+});
+
+app.get('/api/campaigns/history', async (req, res) => {
+  try {
+    const history = rows(await db.execute({
+      sql: `
+        SELECT
+          campaign_id,
+          template_name,
+          MIN(sent_at) as sent_at,
+          COUNT(id) as total,
+          SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+        FROM campaign_logs
+        GROUP BY campaign_id, template_name
+        ORDER BY MIN(sent_at) DESC
+      `,
+      args: [],
+    }));
+    res.json(history);
+  } catch (err) {
+    return sendInternalError(res, 'Error obteniendo historial de campañas:', err);
+  }
+});
+
+
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 app.get('/api/dashboard', async (req, res) => {
   try {

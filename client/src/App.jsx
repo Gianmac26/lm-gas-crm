@@ -15,6 +15,7 @@ import Config from './components/Config.jsx';
 import Conversations from './components/Conversations.jsx';
 import ConversationDetail from './components/ConversationDetail.jsx';
 import Catalog from './components/Catalog.jsx';
+import Campaigns from './components/Campaigns.jsx';
 
 export const AppContext = createContext(null);
 
@@ -65,6 +66,7 @@ export default function App() {
           <Route path="conversations" element={<Conversations />} />
           <Route path="conversations/:id" element={<ConversationDetail />} />
           <Route path="catalog" element={<Catalog />} />
+          <Route path="campaigns" element={<Campaigns />} />
         </Route>
       </Routes>
     </AppContext.Provider>

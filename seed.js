@@ -141,6 +141,16 @@ async function ensureSchema() {
               received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )`, args: [] },
+    { sql: `CREATE TABLE IF NOT EXISTS campaign_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              campaign_id TEXT NOT NULL,
+              client_id INTEGER REFERENCES clients(id),
+              telefono TEXT NOT NULL,
+              template_name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              error_message TEXT,
+              sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )`, args: [] },
   ], 'write');
 
   const clientColumns = [
