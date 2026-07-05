@@ -323,10 +323,13 @@ export default function ConversationDetail() {
     if (!conversation || statusUpdating) return;
     const nextStatus = conversation.status === 'closed' ? 'open' : 'closed';
     setStatusUpdating(true);
+    setSendError(null);
     try {
       const updated = await conversationsApi.setStatus(convId, nextStatus);
       setConversation(updated);
-    } catch { /* no crítico, el estado local no cambia */ }
+    } catch {
+      setSendError('No se pudo actualizar el estado de la conversación. Intenta de nuevo.');
+    }
     setStatusUpdating(false);
   };
 
