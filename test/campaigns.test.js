@@ -165,3 +165,36 @@ test('POST /api/campaigns/send con source=clients (default) registra client_id, 
   assert.equal(logRow.campaign_contact_id, null);
   assert.equal(logRow.contact_source, 'clients');
 });
+
+test('POST /api/campaigns/send construye el texto de variable con el fallback correcto para valores vacíos', async () => {
+  const csv = ['telefono,nombre_o_referencia', '51966666666,Prospecto Fallback Test'].join('\n');
+  const importRes = await api('POST', '/api/campaigns/import-contacts', { csv });
+  const contactId = importRes.data.contacts[0].id;
+
+  const originalFetch = global.fetch;
+  let capturedBody = null;
+  global.fetch = async (url, options) => {
+    if (typeof url === 'string' && url.includes('graph.facebook.com')) {
+      capturedBody = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.FAKE_TEST_ID' }] }) };
+    }
+    return originalFetch(url, options);
+  };
+
+  try {
+    const sendRes = await api('POST', '/api/campaigns/send', {
+      template_name: 'plantilla_test',
+      template_language: 'es',
+      client_ids: [contactId],
+      source: 'campaign_contacts',
+      variable_mapping: { '1': 'dias_sin_pedir' },
+    });
+    assert.equal(sendRes.status, 200);
+    assert.equal(sendRes.data.sent, 1);
+    const sentText = capturedBody.template.components[0].parameters[0].text;
+    assert.equal(sentText, 'Sin historial');
+    assert.notEqual(sentText, 'dias_sin_pedir');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

@@ -1967,12 +1967,20 @@ app.post('/api/campaigns/send', async (req, res) => {
 
     const components = [];
     if (variable_mapping && Object.keys(variable_mapping).length > 0) {
+        const CLIENT_DATA_FIELD_KEYS = new Set(['nombre', 'dias_sin_pedir', 'zona', 'tipo']);
         const bodyParams = Object.entries(variable_mapping)
             .filter(([key, value]) => !isNaN(parseInt(key))) // filter only body variables
             .map(([key, value]) => {
                 let text = value;
-                if (client[value]) {
-                    text = client[value];
+                if (CLIENT_DATA_FIELD_KEYS.has(value)) {
+                    const fieldValue = client[value];
+                    if (fieldValue !== null && fieldValue !== undefined && fieldValue !== '') {
+                        text = fieldValue;
+                    } else if (value === 'dias_sin_pedir') {
+                        text = 'Sin historial';
+                    } else {
+                        text = '—';
+                    }
                 }
                 return { type: 'text', text: String(text) };
             });
