@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Megaphone, CheckCircle, XCircle, Clock, CalendarClock, CalendarX, Users, ChevronRight, ArrowLeft } from 'lucide-react';
+import { Megaphone, CheckCircle, XCircle, Clock, CalendarClock, CalendarX, Users, ChevronRight, ArrowLeft, Upload } from 'lucide-react';
 import api from '../api';
 
 // Helper component for styled cards
@@ -38,6 +38,10 @@ export default function Campaigns() {
   const [filters, setFilters] = useState({ zone: 'all', type: 'all' });
   const [selectedTemplate, setSelectedTemplate] = useState(null);
   const [variableMap, setVariableMap] = useState({});
+  const [contactSource, setContactSource] = useState('clients');
+  const [importMode, setImportMode] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importSummary, setImportSummary] = useState(null);
 
   // UI State
   const [loading, setLoading] = useState(false);
@@ -93,7 +97,26 @@ export default function Campaigns() {
     }
     fetchClients();
   }, [segment, filters]);
-  
+
+  const handleImportCsv = async (file) => {
+    setImporting(true);
+    setError(null);
+    setImportSummary(null);
+    try {
+      const csvText = await file.text();
+      const data = await api.post('/campaigns/import-contacts', { csv: csvText }).then(r => r.data);
+      setEligibleClients(data.contacts);
+      setImportSummary(data.summary);
+      setContactSource('campaign_contacts');
+    } catch (err) {
+      const msg = err?.response?.data?.error || 'Error al importar el archivo. Intenta de nuevo.';
+      setError(msg);
+      setEligibleClients([]);
+      setImportSummary(null);
+    }
+    setImporting(false);
+  };
+
   const resetWizard = () => {
     setStep(1);
     setSegment(null);
@@ -103,6 +126,9 @@ export default function Campaigns() {
     setEligibleClients([]);
     setCampaignResult(null);
     setError(null);
+    setContactSource('clients');
+    setImportMode(false);
+    setImportSummary(null);
   };
 
   const handleSendCampaign = async () => {
@@ -115,7 +141,8 @@ export default function Campaigns() {
       template_name: selectedTemplate.name,
       template_language: selectedTemplate.language,
       client_ids: eligibleClients.map(c => c.id),
-      variable_mapping: variableMap
+      variable_mapping: variableMap,
+      source: contactSource,
     };
 
     try {
@@ -265,13 +292,58 @@ export default function Campaigns() {
         {SEGMENTS.map(s => {
           const isSelected = segment?.key === s.key;
           return (
-            <Card key={s.key} onClick={() => setSegment(s)} selected={isSelected}>
+            <Card
+              key={s.key}
+              onClick={() => { setSegment(s); setImportMode(false); setImportSummary(null); setContactSource('clients'); }}
+              selected={isSelected}
+            >
               <s.icon size={22} className={`mb-2 ${isSelected ? 'text-orange-600' : 'text-gray-400'}`} />
               <h3 className="font-bold text-base text-left">{s.label}</h3>
             </Card>
           );
         })}
+        <Card
+          onClick={() => { setImportMode(true); setSegment(null); setEligibleClients([]); setImportSummary(null); setError(null); }}
+          selected={importMode}
+        >
+          <Upload size={22} className={`mb-2 ${importMode ? 'text-orange-600' : 'text-gray-400'}`} />
+          <h3 className="font-bold text-base text-left">Importar lista externa (CSV)</h3>
+        </Card>
       </div>
+
+      {importMode && (
+        <div className="bg-gray-50 rounded-lg p-4 mb-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">Subir archivo CSV</h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Columnas requeridas: <code>telefono</code>, <code>nombre_o_referencia</code>. Columna opcional: <code>zona</code>.
+          </p>
+          <input
+            type="file"
+            accept=".csv"
+            disabled={importing}
+            onChange={e => {
+              const file = e.target.files?.[0];
+              if (file) handleImportCsv(file);
+            }}
+            className="block w-full text-sm text-gray-600"
+          />
+          {importing && <p className="mt-3 text-sm text-gray-500">Importando…</p>}
+          {error && <p className="mt-3 text-red-500 text-sm">{error}</p>}
+          {importSummary && (
+            <div className="mt-3 text-sm text-gray-700 space-y-1">
+              <p><strong>{importSummary.importados}</strong> contactos importados de {importSummary.total_filas} filas.</p>
+              {importSummary.ya_cliente > 0 && <p className="text-gray-500">{importSummary.ya_cliente} ya eran clientes (omitidos).</p>}
+              {importSummary.ya_importado > 0 && <p className="text-gray-500">{importSummary.ya_importado} ya se habían importado antes (omitidos).</p>}
+              {importSummary.invalidas > 0 && <p className="text-gray-500">{importSummary.invalidas} filas inválidas (omitidas).</p>}
+            </div>
+          )}
+          {eligibleClients.length > 0 && importSummary && (
+            <button onClick={() => setStep(2)} className="mt-4 bg-orange-500 text-white font-bold py-2 px-4 rounded-lg flex items-center">
+              Siguiente <ChevronRight size={20} className="ml-1" />
+            </button>
+          )}
+        </div>
+      )}
 
       {segment && (
         <>
@@ -433,7 +505,7 @@ export default function Campaigns() {
       <p className="text-gray-600 mb-4">Revisa los detalles de tu campaña antes de enviar.</p>
       
       <div className="space-y-4 bg-white p-6 rounded-lg border">
-        <p><strong>Clientes:</strong> {eligibleClients.length} destinatarios del segmento "{segment.label}"</p>
+        <p><strong>Clientes:</strong> {eligibleClients.length} destinatarios del segmento "{segment ? segment.label : 'Importar lista externa (CSV)'}"</p>
         <p><strong>Plantilla:</strong> {selectedTemplate.name}</p>
         <div>
           <h3 className="font-bold mb-2">Mensaje final (preview con el primer cliente):</h3>
