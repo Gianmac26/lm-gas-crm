@@ -1818,6 +1818,90 @@ app.get('/api/campaigns/eligible-clients', async (req, res) => {
   }
 });
 
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return { headers: [], rows: [] };
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const dataRows = lines.slice(1).map(line => {
+    const cells = line.split(',').map(c => c.trim());
+    const dataRow = {};
+    headers.forEach((h, i) => { dataRow[h] = cells[i] !== undefined ? cells[i] : ''; });
+    return dataRow;
+  });
+  return { headers, rows: dataRows };
+}
+
+app.post('/api/campaigns/import-contacts', async (req, res) => {
+  try {
+    const csvText = typeof req.body?.csv === 'string' ? req.body.csv.trim() : '';
+    if (!csvText) {
+      return res.status(400).json({ error: 'El archivo está vacío.' });
+    }
+
+    const { headers, rows: dataRows } = parseCsv(csvText);
+    if (!headers.includes('telefono') || !headers.includes('nombre_o_referencia')) {
+      return res.status(400).json({
+        error: `El CSV debe tener las columnas 'telefono' y 'nombre_o_referencia'. Encontradas: ${headers.join(', ')}.`,
+      });
+    }
+    if (dataRows.length === 0) {
+      return res.status(400).json({ error: 'El archivo no tiene filas de datos, solo encabezado.' });
+    }
+
+    const importBatch = `IMPORTADO_${todayStr()}`;
+    const summary = { total_filas: dataRows.length, importados: 0, ya_cliente: 0, ya_importado: 0, invalidas: 0 };
+    const imported = [];
+
+    for (const dataRow of dataRows) {
+      const phoneNormalized = normalizePhone(dataRow.telefono);
+      const nombre = (dataRow.nombre_o_referencia || '').trim();
+      const zona = (dataRow.zona || '').trim() || null;
+
+      if (!isValidWhatsappPhone(phoneNormalized) || !nombre) {
+        summary.invalidas++;
+        continue;
+      }
+
+      const existingClient = row(await db.execute({
+        sql: 'SELECT id FROM clients WHERE phone_normalized = ? LIMIT 1',
+        args: [phoneNormalized],
+      }));
+      if (existingClient) {
+        summary.ya_cliente++;
+        continue;
+      }
+
+      const existingContact = row(await db.execute({
+        sql: 'SELECT id FROM campaign_contacts WHERE phone_normalized = ? LIMIT 1',
+        args: [phoneNormalized],
+      }));
+      if (existingContact) {
+        summary.ya_importado++;
+        continue;
+      }
+
+      const insertResult = await db.execute({
+        sql: `INSERT INTO campaign_contacts (phone, phone_normalized, nombre, zona, import_batch)
+              VALUES (?, ?, ?, ?, ?)`,
+        args: [dataRow.telefono, phoneNormalized, nombre, zona, importBatch],
+      });
+      summary.importados++;
+      imported.push({
+        id: lastId(insertResult),
+        nombre,
+        telefono: phoneNormalized,
+        zona,
+        tipo: null,
+        dias_sin_pedir: null,
+      });
+    }
+
+    res.json({ import_batch: importBatch, contacts: imported, summary });
+  } catch (err) {
+    return sendInternalError(res, 'Error importando contactos de campaña:', err);
+  }
+});
+
 app.post('/api/campaigns/send', async (req, res) => {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;

@@ -63,3 +63,56 @@ test('initDb crea las tablas campaign_contacts y campaign_logs con las columnas 
   assert.ok(logsCols.includes('campaign_contact_id'), 'debe tener campaign_contact_id');
   assert.ok(logsCols.includes('client_id'), 'debe conservar client_id');
 });
+
+test('POST /api/campaigns/import-contacts importa válidas y cuenta duplicados/inválidas', async () => {
+  await createClient({ name: 'Cliente Existente', phone: '51911111111' });
+
+  const csv = [
+    'telefono,nombre_o_referencia,zona',
+    '51922222222,Prospecto Uno,San Borja',
+    '51911111111,Ya Es Cliente,Surco',
+    'no-es-telefono,Invalido,Otra',
+    '51922222222,Prospecto Uno Repetido,San Borja',
+  ].join('\n');
+
+  const res = await api('POST', '/api/campaigns/import-contacts', { csv });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.summary.total_filas, 4);
+  assert.equal(res.data.summary.importados, 1);
+  assert.equal(res.data.summary.ya_cliente, 1);
+  assert.equal(res.data.summary.ya_importado, 1);
+  assert.equal(res.data.summary.invalidas, 1);
+  assert.equal(res.data.contacts.length, 1);
+  assert.equal(res.data.contacts[0].telefono, '51922222222');
+  assert.equal(res.data.contacts[0].zona, 'San Borja');
+  assert.equal(res.data.contacts[0].dias_sin_pedir, null);
+  assert.match(res.data.import_batch, /^IMPORTADO_\d{4}-\d{2}-\d{2}$/);
+});
+
+test('POST /api/campaigns/import-contacts reimportar el mismo CSV no duplica', async () => {
+  const csv = ['telefono,nombre_o_referencia', '51933333333,Prospecto Dos'].join('\n');
+
+  const first = await api('POST', '/api/campaigns/import-contacts', { csv });
+  assert.equal(first.data.summary.importados, 1);
+
+  const second = await api('POST', '/api/campaigns/import-contacts', { csv });
+  assert.equal(second.data.summary.importados, 0);
+  assert.equal(second.data.summary.ya_importado, 1);
+});
+
+test('POST /api/campaigns/import-contacts rechaza archivo vacío', async () => {
+  const res = await api('POST', '/api/campaigns/import-contacts', { csv: '' });
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/campaigns/import-contacts rechaza headers faltantes', async () => {
+  const csv = ['telefono,otra_columna', '51944444444,algo'].join('\n');
+  const res = await api('POST', '/api/campaigns/import-contacts', { csv });
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /nombre_o_referencia/);
+});
+
+test('POST /api/campaigns/import-contacts rechaza archivo sin filas de datos', async () => {
+  const res = await api('POST', '/api/campaigns/import-contacts', { csv: 'telefono,nombre_o_referencia' });
+  assert.equal(res.status, 400);
+});
