@@ -90,6 +90,7 @@ export const conversations = {
   send:       (id, data)     => api.post(`/conversations/${id}/messages`, data).then(r => r.data),
   markRead:   (id)           => api.patch(`/conversations/${id}/read`).then(r => r.data),
   setStatus:  (id, status)   => api.patch(`/conversations/${id}/status`, { status }).then(r => r.data),
+  sendTemplate: (id, data)   => api.post(`/conversations/${id}/template`, data).then(r => r.data),
 };
 
 export default api;

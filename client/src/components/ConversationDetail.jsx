@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { conversations as conversationsApi } from '../api.js';
+import api from '../api.js';
 import { ChevronLeft, Send, Check, CheckCheck, Clock, AlertCircle, User, Lock, Unlock } from 'lucide-react';
 
 const POLL_INTERVAL = 5000;
@@ -58,6 +59,39 @@ function mediaLabel(type) {
   return MEDIA_LABELS[type] || '📎 Adjunto';
 }
 
+function extractTemplateVariables(template) {
+  const bodyText = template?.components?.find(c => c.type === 'BODY')?.text || '';
+  return (bodyText.match(/\{\{[0-9]+\}\}/g) || []).map(v => v.replace(/\{|\}/g, ''));
+}
+
+function renderTemplateText(template, vars) {
+  const bodyComponent = template?.components?.find(c => c.type === 'BODY');
+  let text = bodyComponent?.text || '';
+  extractTemplateVariables(template).forEach(key => {
+    text = text.split(`{{${key}}}`).join(vars[key] || `{{${key}}}`);
+  });
+  return text;
+}
+
+function renderTemplatePreviewNodes(template, vars) {
+  const bodyComponent = template?.components?.find(c => c.type === 'BODY');
+  const text = bodyComponent?.text || '';
+  if (!text) return 'No hay preview disponible.';
+
+  let parts = [text];
+  extractTemplateVariables(template).forEach(key => {
+    const placeholder = `{{${key}}}`;
+    const replacement = vars[key] || placeholder;
+    parts = parts.flatMap(part => {
+      if (typeof part !== 'string') return [part];
+      const idx = part.indexOf(placeholder);
+      if (idx === -1) return [part];
+      return [part.slice(0, idx), <strong key={`tvar-${key}`}>{replacement}</strong>, part.slice(idx + placeholder.length)];
+    });
+  });
+  return parts;
+}
+
 export default function ConversationDetail() {
   const { id } = useParams();
   const nav = useNavigate();
@@ -71,6 +105,13 @@ export default function ConversationDetail() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
   const [statusUpdating, setStatusUpdating] = useState(false);
+  const [templateMode, setTemplateMode] = useState(false);
+  const [templates, setTemplates] = useState([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState(null);
+  const [selectedTemplate, setSelectedTemplate] = useState(null);
+  const [templateVars, setTemplateVars] = useState({});
+  const [templateSending, setTemplateSending] = useState(false);
 
   const messagesEndRef  = useRef(null);
   const chatRef         = useRef(null);
@@ -202,9 +243,73 @@ export default function ConversationDetail() {
           return exists ? prev : [...prev, errData.whatsapp_message];
         });
       }
+      if (code === 'TEMPLATE_REQUIRED') {
+        openTemplatePicker();
+      }
     } finally {
       setSending(false);
     }
+  };
+
+  const openTemplatePicker = async () => {
+    setTemplateMode(true);
+    setTemplatesError(null);
+    setTemplatesLoading(true);
+    try {
+      const data = await api.get('/campaigns/templates').then(r => r.data);
+      setTemplates(data);
+    } catch (err) {
+      setTemplatesError('No se pudieron cargar las plantillas. ' + err.message);
+    }
+    setTemplatesLoading(false);
+  };
+
+  const selectTemplate = (template) => {
+    setSelectedTemplate(template);
+    const variables = extractTemplateVariables(template);
+    const initialVars = {};
+    variables.forEach((key, idx) => {
+      initialVars[key] = idx === 0 ? name : '';
+    });
+    setTemplateVars(initialVars);
+  };
+
+  const cancelTemplateMode = () => {
+    setTemplateMode(false);
+    setSelectedTemplate(null);
+    setTemplateVars({});
+    setTemplatesError(null);
+  };
+
+  const handleSendTemplate = async () => {
+    if (!selectedTemplate || templateSending) return;
+    const variables = extractTemplateVariables(selectedTemplate);
+    const bodyText = renderTemplateText(selectedTemplate, templateVars);
+    const components = variables.length > 0
+      ? [{ type: 'body', parameters: variables.map(key => ({ type: 'text', text: templateVars[key] || '' })) }]
+      : [];
+
+    setTemplateSending(true);
+    setSendError(null);
+    try {
+      const data = await conversationsApi.sendTemplate(convId, {
+        template_name: selectedTemplate.name,
+        template_language: selectedTemplate.language,
+        components,
+        body: bodyText,
+        client_request_id: crypto.randomUUID(),
+      });
+      setMessages(prev => {
+        const exists = prev.some(m => m.id === data.message.id);
+        return exists ? prev : [...prev, data.message];
+      });
+      isNearBottomRef.current = true;
+      cancelTemplateMode();
+    } catch (err) {
+      const errData = err?.response?.data;
+      setSendError(getErrorText(errData?.error, errData?.message));
+    }
+    setTemplateSending(false);
   };
 
   const handleKeyDown = e => {
@@ -355,35 +460,85 @@ export default function ConversationDetail() {
       )}
 
       {/* Input */}
-      <div className="flex-shrink-0 px-4 py-3 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
-        <div className="flex items-end gap-2">
-          <textarea
-            ref={textareaRef}
-            className="input flex-1 !py-2.5 resize-none text-sm leading-snug"
-            style={{ minHeight: '42px', maxHeight: '120px', overflowY: 'auto' }}
-            placeholder="Escribe un mensaje…"
-            value={text}
-            onChange={e => {
-              setText(e.target.value);
-              setSendError(null);
-              autoResizeTextarea();
-            }}
-            onKeyDown={handleKeyDown}
-            disabled={sending}
-            rows={1}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!text.trim() || sending}
-            className={`flex-shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition-colors touch-manipulation
-              ${!text.trim() || sending
-                ? 'bg-gray-100 dark:bg-gray-700 text-gray-300 dark:text-gray-500 cursor-not-allowed'
-                : 'bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white'}`}
-          >
-            <Send size={18} />
-          </button>
+      {templateMode ? (
+        <div className="flex-shrink-0 px-4 py-3 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 space-y-3">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            La ventana de 24h para mensajes libres terminó. Elegí una plantilla aprobada para reactivar la conversación.
+          </p>
+          {templatesLoading && <p className="text-sm text-gray-500 dark:text-gray-400">Cargando plantillas…</p>}
+          {templatesError && <p className="text-sm text-red-500">{templatesError}</p>}
+          {!templatesLoading && !templatesError && (
+            <select
+              className="input text-sm"
+              value={selectedTemplate?.name || ''}
+              onChange={e => {
+                const t = templates.find(t => t.name === e.target.value);
+                if (t) selectTemplate(t);
+              }}
+            >
+              <option value="">Elegir plantilla…</option>
+              {templates.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
+            </select>
+          )}
+          {selectedTemplate && (
+            <>
+              {extractTemplateVariables(selectedTemplate).map(key => (
+                <input
+                  key={key}
+                  type="text"
+                  className="input text-sm"
+                  placeholder={`Variable {{${key}}}`}
+                  value={templateVars[key] || ''}
+                  onChange={e => setTemplateVars(v => ({ ...v, [key]: e.target.value }))}
+                />
+              ))}
+              <div className="bg-gray-50 dark:bg-gray-700 p-3 rounded-xl text-sm text-gray-800 dark:text-gray-100">
+                {renderTemplatePreviewNodes(selectedTemplate, templateVars)}
+              </div>
+            </>
+          )}
+          <div className="flex justify-end gap-2">
+            <button onClick={cancelTemplateMode} className="btn-ghost !py-2 !px-3 text-xs">Cancelar</button>
+            <button
+              onClick={handleSendTemplate}
+              disabled={!selectedTemplate || templateSending}
+              className={`px-4 py-2 rounded-xl text-xs font-semibold text-white ${!selectedTemplate || templateSending ? 'bg-gray-300 dark:bg-gray-600 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600'}`}
+            >
+              {templateSending ? 'Enviando…' : 'Enviar plantilla'}
+            </button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex-shrink-0 px-4 py-3 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+          <div className="flex items-end gap-2">
+            <textarea
+              ref={textareaRef}
+              className="input flex-1 !py-2.5 resize-none text-sm leading-snug"
+              style={{ minHeight: '42px', maxHeight: '120px', overflowY: 'auto' }}
+              placeholder="Escribe un mensaje…"
+              value={text}
+              onChange={e => {
+                setText(e.target.value);
+                setSendError(null);
+                autoResizeTextarea();
+              }}
+              onKeyDown={handleKeyDown}
+              disabled={sending}
+              rows={1}
+            />
+            <button
+              onClick={handleSend}
+              disabled={!text.trim() || sending}
+              className={`flex-shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition-colors touch-manipulation
+                ${!text.trim() || sending
+                  ? 'bg-gray-100 dark:bg-gray-700 text-gray-300 dark:text-gray-500 cursor-not-allowed'
+                  : 'bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white'}`}
+            >
+              <Send size={18} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
