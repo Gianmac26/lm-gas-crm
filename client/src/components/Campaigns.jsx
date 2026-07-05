@@ -128,6 +128,7 @@ export default function Campaigns() {
     setError(null);
     setContactSource('clients');
     setImportMode(false);
+    setImporting(false);
     setImportSummary(null);
   };
 
