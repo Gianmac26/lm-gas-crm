@@ -116,3 +116,52 @@ test('POST /api/campaigns/import-contacts rechaza archivo sin filas de datos', a
   const res = await api('POST', '/api/campaigns/import-contacts', { csv: 'telefono,nombre_o_referencia' });
   assert.equal(res.status, 400);
 });
+
+test('POST /api/campaigns/send con source=campaign_contacts registra campaign_contact_id, no client_id', async () => {
+  // Teléfono de 8 dígitos: pasa la validación de import (isValidWhatsappPhone,
+  // 8-15 dígitos) pero falla el regex estricto de envío (/^519\d{8}$/),
+  // así que el endpoint de send falla en la rama "teléfono inválido" sin
+  // necesidad de una llamada real a la API de Meta.
+  const csv = ['telefono,nombre_o_referencia', '12345678,Prospecto Telefono Raro'].join('\n');
+  const importRes = await api('POST', '/api/campaigns/import-contacts', { csv });
+  const contactId = importRes.data.contacts[0].id;
+  assert.equal(importRes.data.contacts[0].telefono, '12345678');
+
+  const sendRes = await api('POST', '/api/campaigns/send', {
+    template_name: 'plantilla_test',
+    template_language: 'es',
+    client_ids: [contactId],
+    source: 'campaign_contacts',
+  });
+  assert.equal(sendRes.status, 200);
+  assert.equal(sendRes.data.failed, 1);
+  assert.equal(sendRes.data.results[0].error, 'Número de teléfono inválido o ausente.');
+
+  const logRow = row(await db.execute({
+    sql: 'SELECT client_id, campaign_contact_id, contact_source FROM campaign_logs WHERE campaign_id = ? LIMIT 1',
+    args: [sendRes.data.campaign_id],
+  }));
+  assert.equal(logRow.client_id, null);
+  assert.equal(logRow.campaign_contact_id, contactId);
+  assert.equal(logRow.contact_source, 'campaign_contacts');
+});
+
+test('POST /api/campaigns/send con source=clients (default) registra client_id, no campaign_contact_id', async () => {
+  const clientId = await createClient({ name: 'Cliente Telefono Raro', phone: '12345678' });
+
+  const sendRes = await api('POST', '/api/campaigns/send', {
+    template_name: 'plantilla_test',
+    template_language: 'es',
+    client_ids: [clientId],
+  });
+  assert.equal(sendRes.status, 200);
+  assert.equal(sendRes.data.failed, 1);
+
+  const logRow = row(await db.execute({
+    sql: 'SELECT client_id, campaign_contact_id, contact_source FROM campaign_logs WHERE campaign_id = ? LIMIT 1',
+    args: [sendRes.data.campaign_id],
+  }));
+  assert.equal(logRow.client_id, clientId);
+  assert.equal(logRow.campaign_contact_id, null);
+  assert.equal(logRow.contact_source, 'clients');
+});

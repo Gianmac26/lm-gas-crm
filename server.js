@@ -1911,6 +1911,7 @@ app.post('/api/campaigns/send', async (req, res) => {
   }
 
   const { template_name, template_language, client_ids, variable_mapping } = req.body;
+  const source = req.body.source === 'campaign_contacts' ? 'campaign_contacts' : 'clients';
 
   if (!template_name || !template_language || !Array.isArray(client_ids) || !client_ids.length) {
     return res.status(400).json({ error: 'Faltan parámetros requeridos: template_name, template_language, client_ids.' });
@@ -1922,18 +1923,22 @@ app.post('/api/campaigns/send', async (req, res) => {
   let failed = 0;
 
   const clientData = rows(await db.execute({
-    sql: `
-      WITH ClientLastOrder AS (
-        SELECT client_id, MAX(created_at) as last_order_date FROM orders GROUP BY client_id
-      )
-      SELECT
-        c.id,
-        c.name as nombre,
-        c.phone_normalized as telefono,
-        COALESCE(ROUND(julianday('now') - julianday(clo.last_order_date)), NULL) as dias_sin_pedir
-      FROM clients c
-      LEFT JOIN ClientLastOrder clo ON c.id = clo.client_id
-      WHERE c.id IN (${client_ids.map(() => '?').join(',')})`,
+    sql: source === 'campaign_contacts'
+      ? `SELECT id, nombre, phone_normalized as telefono, NULL as dias_sin_pedir
+         FROM campaign_contacts
+         WHERE id IN (${client_ids.map(() => '?').join(',')})`
+      : `
+        WITH ClientLastOrder AS (
+          SELECT client_id, MAX(created_at) as last_order_date FROM orders GROUP BY client_id
+        )
+        SELECT
+          c.id,
+          c.name as nombre,
+          c.phone_normalized as telefono,
+          COALESCE(ROUND(julianday('now') - julianday(clo.last_order_date)), NULL) as dias_sin_pedir
+        FROM clients c
+        LEFT JOIN ClientLastOrder clo ON c.id = clo.client_id
+        WHERE c.id IN (${client_ids.map(() => '?').join(',')})`,
     args: client_ids,
   }));
 
@@ -1945,9 +1950,17 @@ app.post('/api/campaigns/send', async (req, res) => {
       failed++;
       results.push({ client_id: clientId, nombre: client?.nombre, status: 'failed', error: 'Número de teléfono inválido o ausente.' });
       await db.execute({
-        sql: `INSERT INTO campaign_logs (campaign_id, client_id, telefono, template_name, status, error_message)
-              VALUES (?, ?, ?, ?, 'failed', ?)`,
-        args: [campaign_id, clientId, client?.telefono || 'N/A', template_name, 'Número de teléfono inválido o ausente.'],
+        sql: `INSERT INTO campaign_logs (campaign_id, client_id, campaign_contact_id, contact_source, telefono, template_name, status, error_message)
+              VALUES (?, ?, ?, ?, ?, ?, 'failed', ?)`,
+        args: [
+          campaign_id,
+          source === 'clients' ? clientId : null,
+          source === 'campaign_contacts' ? clientId : null,
+          source,
+          client?.telefono || 'N/A',
+          template_name,
+          'Número de teléfono inválido o ausente.',
+        ],
       });
       continue;
     }
@@ -2010,9 +2023,18 @@ app.post('/api/campaigns/send', async (req, res) => {
 
     results.push({ client_id: clientId, nombre: client.nombre, status, error: error_message });
     await db.execute({
-      sql: `INSERT INTO campaign_logs (campaign_id, client_id, telefono, template_name, status, error_message)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [campaign_id, clientId, client.telefono, template_name, status, error_message],
+      sql: `INSERT INTO campaign_logs (campaign_id, client_id, campaign_contact_id, contact_source, telefono, template_name, status, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        campaign_id,
+        source === 'clients' ? clientId : null,
+        source === 'campaign_contacts' ? clientId : null,
+        source,
+        client.telefono,
+        template_name,
+        status,
+        error_message,
+      ],
     });
 
     // Espera de 200ms
