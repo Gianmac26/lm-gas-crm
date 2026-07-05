@@ -143,6 +143,8 @@ export default function Campaigns() {
     { key: 'zona', label: 'Zona' },
     { key: 'tipo', label: 'Tipo' },
   ];
+
+  const CLIENT_DATA_FIELD_KEYS = new Set(CLIENT_DATA_FIELDS.map(f => f.key));
   
   const filteredTemplates = useMemo(() => {
     if (!segment) return templates;
@@ -168,8 +170,15 @@ export default function Campaigns() {
       const mappedValue = mapping[key];
       let replacement = placeholder;
 
-      if (mappedValue && client && client[mappedValue]) {
-        replacement = client[mappedValue];
+      if (mappedValue && CLIENT_DATA_FIELD_KEYS.has(mappedValue)) {
+        const value = client ? client[mappedValue] : undefined;
+        if (value !== null && value !== undefined && value !== '') {
+          replacement = value;
+        } else if (mappedValue === 'dias_sin_pedir') {
+          replacement = 'Sin historial';
+        } else {
+          replacement = '—';
+        }
       } else if (mappedValue) {
         replacement = mappedValue;
       }
