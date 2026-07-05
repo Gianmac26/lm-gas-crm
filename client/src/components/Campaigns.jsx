@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Megaphone, CheckCircle, XCircle, Clock, ChevronRight, ArrowLeft } from 'lucide-react';
+import { Megaphone, CheckCircle, XCircle, Clock, CalendarClock, CalendarX, Users, ChevronRight, ArrowLeft } from 'lucide-react';
 import api from '../api';
 
 // Helper component for styled cards
 const Card = ({ children, onClick, selected, disabled }) => (
   <div
-    className={`p-4 border rounded-lg cursor-pointer transition-all ${
-      selected ? 'border-orange-500 bg-orange-50 ring-2 ring-orange-500' : 'border-gray-300 bg-white hover:border-gray-400'
+    className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${
+      selected ? 'border-orange-500 bg-orange-50' : 'border-gray-200 bg-white hover:border-gray-300'
     } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
     onClick={!disabled ? onClick : undefined}
   >
@@ -127,12 +127,14 @@ export default function Campaigns() {
     setLoading(false);
   };
   
+  const STEP_LABELS = ['Segmento', 'Plantilla', 'Variables', 'Confirmación', 'Resultados'];
+
   const SEGMENTS = [
-    { key: 'inactive_7', label: 'Inactivos +7 días' },
-    { key: 'inactive_14', label: 'Inactivos +14 días' },
-    { key: 'inactive_30', label: 'Inactivos +30 días' },
-    { key: 'inactive_60', label: 'Inactivos +60 días' },
-    { key: 'all', label: 'Todos los clientes' },
+    { key: 'inactive_7', label: 'Inactivos +7 días', icon: Clock },
+    { key: 'inactive_14', label: 'Inactivos +14 días', icon: Clock },
+    { key: 'inactive_30', label: 'Inactivos +30 días', icon: CalendarClock },
+    { key: 'inactive_60', label: 'Inactivos +60 días', icon: CalendarX },
+    { key: 'all', label: 'Todos los clientes', icon: Users },
   ];
   
   const CLIENT_DATA_FIELDS = [
@@ -212,15 +214,23 @@ export default function Campaigns() {
   const renderWizard = () => (
     <>
       {/* Step Indicator */}
-      <div className="mb-8 flex items-center justify-center">
-        {[1, 2, 3, 4, 5].map(s => (
-          <React.Fragment key={s}>
-            <div className={`flex items-center justify-center w-8 h-8 rounded-full ${step >= s ? 'bg-orange-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
-              {step > s ? <CheckCircle size={18} /> : s}
-            </div>
-            {s < 5 && <div className={`flex-auto border-t-2 ${step > s ? 'border-orange-500' : 'border-gray-200'}`}></div>}
-          </React.Fragment>
-        ))}
+      <div className="mb-8 flex items-start justify-center">
+        {STEP_LABELS.map((label, i) => {
+          const s = i + 1;
+          return (
+            <React.Fragment key={s}>
+              <div className="flex flex-col items-center">
+                <div className={`flex items-center justify-center w-8 h-8 rounded-full flex-shrink-0 ${step >= s ? 'bg-orange-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
+                  {step > s ? <CheckCircle size={18} /> : s}
+                </div>
+                <span className={`mt-1.5 text-[11px] font-medium text-center whitespace-nowrap ${step >= s ? 'text-orange-600' : 'text-gray-400'}`}>
+                  {label}
+                </span>
+              </div>
+              {s < 5 && <div className={`flex-auto border-t-2 mt-4 ${step > s ? 'border-orange-500' : 'border-gray-200'}`}></div>}
+            </React.Fragment>
+          );
+        })}
       </div>
 
       {step > 1 && step < 5 && (
@@ -243,34 +253,40 @@ export default function Campaigns() {
       <p className="text-gray-600 mb-4">Selecciona un segmento de clientes para tu campaña.</p>
       
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
-        {SEGMENTS.map(s => (
-          <Card key={s.key} onClick={() => setSegment(s)} selected={segment?.key === s.key}>
-            <h3 className="font-bold text-lg">{s.label}</h3>
-          </Card>
-        ))}
+        {SEGMENTS.map(s => {
+          const isSelected = segment?.key === s.key;
+          return (
+            <Card key={s.key} onClick={() => setSegment(s)} selected={isSelected}>
+              <s.icon size={22} className={`mb-2 ${isSelected ? 'text-orange-600' : 'text-gray-400'}`} />
+              <h3 className="font-bold text-base text-left">{s.label}</h3>
+            </Card>
+          );
+        })}
       </div>
 
       {segment && (
         <>
-          <h3 className="text-lg font-semibold mb-4">Filtros Opcionales</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-            <div>
-              <label htmlFor="zone-filter" className="block text-sm font-medium text-gray-700 mb-1">Zona</label>
-              <select id="zone-filter" value={filters.zone} onChange={e => setFilters(f => ({...f, zone: e.target.value}))} className="w-full p-2 border rounded-md">
-                <option value="all">Todas</option>
-                {zones.map(z => <option key={z} value={z}>{z}</option>)}
-              </select>
-            </div>
-            <div>
-              <label htmlFor="type-filter" className="block text-sm font-medium text-gray-700 mb-1">Tipo de Cliente</label>
-              <select id="type-filter" value={filters.type} onChange={e => setFilters(f => ({...f, type: e.target.value}))} className="w-full p-2 border rounded-md">
-                <option value="all">Todos</option>
-                <option value="Residencial">Residencial</option>
-                <option value="Negocio">Negocio</option>
-              </select>
+          <div className="bg-gray-50 rounded-lg p-4 mb-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">Filtros opcionales</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="zone-filter" className="block text-sm font-medium text-gray-700 mb-1">Zona</label>
+                <select id="zone-filter" value={filters.zone} onChange={e => setFilters(f => ({...f, zone: e.target.value}))} className="w-full p-2 border rounded-md">
+                  <option value="all">Todas</option>
+                  {zones.map(z => <option key={z} value={z}>{z}</option>)}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="type-filter" className="block text-sm font-medium text-gray-700 mb-1">Tipo de Cliente</label>
+                <select id="type-filter" value={filters.type} onChange={e => setFilters(f => ({...f, type: e.target.value}))} className="w-full p-2 border rounded-md">
+                  <option value="all">Todos</option>
+                  <option value="Residencial">Residencial</option>
+                  <option value="Negocio">Negocio</option>
+                </select>
+              </div>
             </div>
           </div>
-          
+
           <div className="mt-6 bg-gray-50 p-4 rounded-lg">
             {loading && <p>Cargando clientes...</p>}
             {error && <p className="text-red-500">{error}</p>}
@@ -279,9 +295,18 @@ export default function Campaigns() {
                 <h3 className="font-bold text-lg text-gray-800">{eligibleClients.length} Clientes Elegibles</h3>
                 {eligibleClients.length > 0 && (
                   <>
-                  <ul className="text-sm text-gray-600 mt-2 max-h-40 overflow-y-auto">
-                    {eligibleClients.slice(0,10).map(c => <li key={c.id}>{c.nombre}</li>)}
-                    {eligibleClients.length > 10 && <li>... y {eligibleClients.length - 10} más.</li>}
+                  <ul className="mt-2 max-h-40 overflow-y-auto space-y-1.5">
+                    {eligibleClients.slice(0,10).map(c => (
+                      <li key={c.id} className="flex items-center gap-2 text-sm text-gray-600">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-orange-100 text-orange-700 text-[11px] font-bold flex items-center justify-center">
+                          {(c.nombre?.[0] || '?').toUpperCase()}
+                        </span>
+                        {c.nombre}
+                      </li>
+                    ))}
+                    {eligibleClients.length > 10 && (
+                      <li className="text-xs text-gray-400 pl-8">... y {eligibleClients.length - 10} más.</li>
+                    )}
                   </ul>
                   <button onClick={() => setStep(2)} className="mt-4 bg-orange-500 text-white font-bold py-2 px-4 rounded-lg flex items-center">
                     Siguiente <ChevronRight size={20} className="ml-1" />
