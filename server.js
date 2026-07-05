@@ -450,6 +450,35 @@ async function migrateCatalogSchema() {
     await ensureColumn('order_items', col, def);
   }
 
+  // ── Campañas masivas de WhatsApp ────────────────────────────────────────────
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS campaign_contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            phone_normalized TEXT NOT NULL UNIQUE,
+            nombre TEXT NOT NULL,
+            zona TEXT,
+            import_batch TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )`,
+    args: [],
+  });
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS campaign_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id TEXT NOT NULL,
+            client_id INTEGER REFERENCES clients(id),
+            telefono TEXT NOT NULL,
+            template_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_message TEXT,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )`,
+    args: [],
+  });
+  await ensureColumn('campaign_logs', 'contact_source', "TEXT NOT NULL DEFAULT 'clients'");
+  await ensureColumn('campaign_logs', 'campaign_contact_id', 'INTEGER REFERENCES campaign_contacts(id)');
+
   // ── price_45kg in config (legacy price_40kg was the 45 kg price) ──────────
   await db.execute({
     sql: `INSERT OR IGNORE INTO config (key, value)
