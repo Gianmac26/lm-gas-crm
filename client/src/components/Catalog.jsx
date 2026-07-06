@@ -8,13 +8,14 @@ const CATEGORY_LABELS = {
   'kit':      '🔧 Kit de Válvula',
   'accesorio':'💧 Productos',
   'servicio': '🛠 Servicios',
+  'regalo':   '🎁 Regalo',
   'otro':     'Otros',
 };
 
 // Order categories appear in, and which ones allow adding products inline
 // (key → default price suggested when adding a new product to that category).
-const CATEGORY_ORDER = ['balón', 'kit', 'accesorio', 'servicio', 'otro'];
-const ADDABLE = { 'kit': 65, 'accesorio': 0, 'servicio': 0 };
+const CATEGORY_ORDER = ['balón', 'kit', 'accesorio', 'servicio', 'regalo', 'otro'];
+const ADDABLE = { 'kit': 65, 'accesorio': 0, 'servicio': 0, 'regalo': 0 };
 
 function isPending(item) {
   return !item.active || (item.sale_price == null || item.sale_price <= 0);
@@ -186,21 +187,22 @@ function ProductCard({ product, onUpdate }) {
 }
 
 function AddProductForm({ category, defaultPrice, onCreated, onCancel }) {
+  const isGift = category === 'regalo';
   const [name, setName]   = useState('');
   const [price, setPrice] = useState(defaultPrice ? String(defaultPrice) : '');
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
     if (!name.trim()) return toast.error('Ingresa un nombre');
-    const p = parseFloat(price) || 0;
+    const p = isGift ? 0 : (parseFloat(price) || 0);
     setSaving(true);
     try {
       await catalogApi.createProduct({
         name: name.trim(),
         category,
         sale_price: p,
-        tracks_inventory: category === 'kit',
-        active: p > 0,
+        tracks_inventory: category === 'kit' || isGift,
+        active: isGift ? true : p > 0,
       });
       toast.success('Producto agregado');
       onCreated();
@@ -219,16 +221,20 @@ function AddProductForm({ category, defaultPrice, onCreated, onCancel }) {
         autoFocus
       />
       <div className="flex items-center gap-2">
-        <div className="flex items-center gap-1 flex-1">
-          <span className="text-gray-400 text-sm">S/</span>
-          <input
-            className="input !py-2 text-sm"
-            type="number" min="0" step="0.50"
-            placeholder="Precio"
-            value={price}
-            onChange={e => setPrice(e.target.value)}
-          />
-        </div>
+        {isGift ? (
+          <div className="flex-1 text-sm text-gray-500 dark:text-gray-400">Precio fijo <strong className="text-gray-700 dark:text-gray-200">S/ 0.00</strong> (regalo)</div>
+        ) : (
+          <div className="flex items-center gap-1 flex-1">
+            <span className="text-gray-400 text-sm">S/</span>
+            <input
+              className="input !py-2 text-sm"
+              type="number" min="0" step="0.50"
+              placeholder="Precio"
+              value={price}
+              onChange={e => setPrice(e.target.value)}
+            />
+          </div>
+        )}
         <button onClick={save} disabled={saving}
           className="px-3 py-2 rounded-xl bg-orange-500 text-white text-sm font-semibold disabled:opacity-50">
           {saving ? '...' : 'Guardar'}
@@ -238,7 +244,9 @@ function AddProductForm({ category, defaultPrice, onCreated, onCancel }) {
           Cancelar
         </button>
       </div>
-      <p className="text-xs text-gray-400">Se activa automáticamente si el precio es mayor que cero.</p>
+      <p className="text-xs text-gray-400">
+        {isGift ? 'Se agrega activo a S/ 0.00 (no suma a ingresos).' : 'Se activa automáticamente si el precio es mayor que cero.'}
+      </p>
     </div>
   );
 }

@@ -108,7 +108,7 @@ export default function ClientForm() {
         <div>
           <label className="label">Balón preferido</label>
           <div className="flex gap-2">
-            {['10kg','40kg','Ambos'].map(b => (
+            {['10kg','45kg','Ambos'].map(b => (
               <button key={b} type="button"
                 onClick={() => set('preferred_balloon', b)}
                 className={`flex-1 py-2.5 rounded-xl font-medium transition-colors

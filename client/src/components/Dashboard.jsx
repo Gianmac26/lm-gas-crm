@@ -3,11 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { dashboard } from '../api.js';
 import {
   TrendingUp, TrendingDown, Package, DollarSign,
-  Clock, AlertTriangle, Star, RefreshCw, Plus
+  Clock, AlertTriangle, Star, RefreshCw, Plus, Wallet
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-function StatCard({ icon: Icon, label, value, sub, color = 'orange', onClick }) {
+function StatCard({ icon: Icon, label, value, sub, color = 'orange', onClick, className = '' }) {
   const colors = {
     orange: 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400',
     blue:   'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400',
@@ -16,7 +16,7 @@ function StatCard({ icon: Icon, label, value, sub, color = 'orange', onClick }) 
   };
   return (
     <div
-      className={`card p-4 ${onClick ? 'cursor-pointer active:scale-95 transition-transform' : ''}`}
+      className={`card p-4 ${className} ${onClick ? 'cursor-pointer active:scale-95 transition-transform' : ''}`}
       onClick={onClick}
     >
       <div className={`inline-flex p-2 rounded-xl mb-3 ${colors[color]}`}>
@@ -105,12 +105,19 @@ export default function Dashboard() {
         {/* Breakdown */}
         <div className="flex gap-4 mt-3 text-sm text-gray-500 dark:text-gray-400">
           <span>🟡 10kg: <strong className="text-gray-700 dark:text-gray-200">{data.breakdown.balloons_10}</strong></span>
-          <span>🔴 40kg: <strong className="text-gray-700 dark:text-gray-200">{data.breakdown.balloons_40}</strong></span>
+          <span>🔴 45kg: <strong className="text-gray-700 dark:text-gray-200">{data.breakdown.balloons_45}</strong></span>
         </div>
       </div>
 
       {/* Tarjetas de stats */}
       <div className="grid grid-cols-2 gap-3">
+        <StatCard
+          className="col-span-2"
+          icon={Wallet} color="blue"
+          label={`Ventas acumuladas ${data.year || ''}`}
+          value={`S/ ${(data.ytdRevenue || 0).toFixed(0)}`}
+          sub={`${data.ytdBalloons || 0} balones vendidos · desde el 1 de enero`}
+        />
         <StatCard
           icon={DollarSign} color="green" label="Ingresos hoy"
           value={`S/ ${data.revenueToday.toFixed(0)}`}

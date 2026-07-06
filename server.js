@@ -154,6 +154,10 @@ async function initDb() {
     }
     if (changed) await db.execute({ sql: `UPDATE config SET value=? WHERE key='zones'`, args: [list.join(',')] });
   }
+
+  // El balón grande es de 45 kg (antes se etiquetaba 40 kg). Normaliza el
+  // "balón preferido" de clientes antiguos para consistencia en segmentación.
+  await db.execute({ sql: `UPDATE clients SET preferred_balloon='45kg' WHERE preferred_balloon='40kg'`, args: [] });
 }
 
 // Ensure DB is ready before every request
@@ -555,6 +559,15 @@ async function reconcileCatalogCategories() {
         args: [name, now, now],
       });
     }
+  }
+
+  // 7. (Una sola vez) desactivar el producto legacy "Servicio" (S/1) para que no
+  //    aparezca al crear pedidos. Se conserva por su historial de pedidos.
+  //    Guardado con flag para no re-desactivarlo si el dueño lo reactiva a mano.
+  const servFlag = row(await db.execute({ sql: `SELECT value FROM config WHERE key='servicio_deactivated'`, args: [] }));
+  if (!servFlag) {
+    await db.execute({ sql: `UPDATE products SET active=0, updated_at=? WHERE name='Servicio' AND category='accesorio'`, args: [now] });
+    await db.execute({ sql: `INSERT OR IGNORE INTO config (key, value) VALUES ('servicio_deactivated','1')`, args: [] });
   }
 }
 
@@ -2111,10 +2124,10 @@ app.get('/api/dashboard', async (req, res) => {
     const balloons_10  = items.filter(i =>
       i.presentation_snapshot === '10 kg' || i.product === 'Balón 10kg'
     ).reduce((s, i) => s + i.quantity, 0);
-    const balloons_40  = items.filter(i =>
+    const balloons_45  = items.filter(i =>
       i.presentation_snapshot === '45 kg' || i.product === 'Balón 40kg'
     ).reduce((s, i) => s + i.quantity, 0);
-    const balloonsToday = balloons_10 + balloons_40;
+    const balloonsToday = balloons_10 + balloons_45;
     const revenueToday  = deliveredToday.reduce((s, o) => s + (o.total || 0), 0);
     const pendingOrders = todayOrders.filter(o => o.status === 'Pendiente' || o.status === 'En camino');
 
@@ -2154,12 +2167,30 @@ app.get('/api/dashboard', async (req, res) => {
       args: [],
     }));
 
+    // ── Acumulado del año en curso: 1 de enero → hoy (año del sistema, dinámico) ──
+    const year      = todayStr().slice(0, 4);          // ej. '2026'
+    const yearStart = `${year}-01-01`;
+    const ytdRevRow = row(await db.execute({
+      sql:  `SELECT COALESCE(SUM(total),0) as total FROM orders
+             WHERE date(created_at, '-5 hours') BETWEEN ? AND ? AND status = 'Entregado'`,
+      args: [yearStart, today],
+    }));
+    const ytdRevenue = ytdRevRow?.total ?? 0;
+    const ytdBalRow = row(await db.execute({
+      sql:  `SELECT COALESCE(SUM(oi.quantity),0) as q FROM order_items oi JOIN orders o ON oi.order_id = o.id
+             WHERE date(o.created_at, '-5 hours') BETWEEN ? AND ? AND o.status = 'Entregado'
+               AND (oi.category_snapshot='balón' OR oi.product IN ('Balón 10kg','Balón 40kg'))`,
+      args: [yearStart, today],
+    }));
+    const ytdBalloons = Number(ytdBalRow?.q || 0);
+
     res.json({
       balloonsToday, goal, revenueToday,
+      ytdRevenue, ytdBalloons, year,
       pendingOrders: pendingOrders.length,
       todayOrders:   todayOrders.length,
       inactiveClients, highDebts, balloonsLastWeek, revenueLastWeek,
-      breakdown: { balloons_10, balloons_40 },
+      breakdown: { balloons_10, balloons_45 },
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2452,12 +2483,17 @@ async function validateAndEnrichItems(items, catalogVersion, executor = db) {
     if (!Number.isFinite(qty) || qty <= 0) {
       throw { status: 400, message: `${pos}: quantity debe ser un entero mayor que cero (recibido: ${item.quantity})` };
     }
-    if (!Number.isFinite(price) || price <= 0) {
-      throw { status: 400, message: `${pos}: unit_price debe ser mayor que cero (recibido: ${item.unit_price})` };
+    // El precio no puede ser negativo. El "> 0" se exige más abajo salvo para
+    // la categoría "regalo" (precio fijo S/0).
+    if (!Number.isFinite(price) || price < 0) {
+      throw { status: 400, message: `${pos}: unit_price no puede ser negativo (recibido: ${item.unit_price})` };
     }
 
     if (catalogVersion !== 1) {
       // Legacy: keep product text as-is, no catalog validation, no snapshots
+      if (price <= 0) {
+        throw { status: 400, message: `${pos}: unit_price debe ser mayor que cero (recibido: ${item.unit_price})` };
+      }
       enriched.push({
         product:               item.product || '',
         description:           item.description || '',
@@ -2490,6 +2526,12 @@ async function validateAndEnrichItems(items, catalogVersion, executor = db) {
       throw { status: 400, message: `${pos}: producto "${product.name}" está inactivo — no se puede pedir` };
     }
 
+    // Los "regalos" tienen precio fijo S/0; el resto exige unit_price > 0.
+    const isGift = product.category === 'regalo';
+    if (!isGift && price <= 0) {
+      throw { status: 400, message: `${pos}: unit_price debe ser mayor que cero (recibido: ${item.unit_price})` };
+    }
+
     let variant = null;
     let catalogPrice = product.sale_price || 0;
 
@@ -2510,7 +2552,7 @@ async function validateAndEnrichItems(items, catalogVersion, executor = db) {
       catalogPrice = variant.sale_price;
     } else if (product.category === 'balón') {
       throw { status: 400, message: `${pos}: los balones de gas requieren variant_id` };
-    } else if (!product.sale_price || product.sale_price <= 0) {
+    } else if (!isGift && (!product.sale_price || product.sale_price <= 0)) {
       throw { status: 400, message: `${pos}: producto "${product.name}" sin precio — pendiente de configurar` };
     }
 
@@ -2523,7 +2565,7 @@ async function validateAndEnrichItems(items, catalogVersion, executor = db) {
       product:               nameSnap,
       description:           item.description || '',
       quantity:              qty,
-      unit_price:            price,
+      unit_price:            isGift ? 0 : price,
       product_id:            product.id,
       variant_id:            variant?.id ?? null,
       product_name_snapshot: nameSnap,
@@ -2531,7 +2573,7 @@ async function validateAndEnrichItems(items, catalogVersion, executor = db) {
       brand_snapshot:        variant?.brand ?? null,
       presentation_snapshot: presSnap,
       valve_type_snapshot:   variant?.valve_type ?? null,
-      catalog_unit_price:    catalogPrice,
+      catalog_unit_price:    isGift ? 0 : catalogPrice,
     });
   }
   return enriched;
@@ -2814,7 +2856,7 @@ app.get('/api/reports/sales', async (req, res) => {
             i_agg AS (
               SELECT order_id,
                 COALESCE(SUM(CASE WHEN presentation_snapshot='10 kg' OR product='Balón 10kg' THEN quantity ELSE 0 END),0) AS balloons_10,
-                COALESCE(SUM(CASE WHEN presentation_snapshot='45 kg' OR product='Balón 40kg' THEN quantity ELSE 0 END),0) AS balloons_40,
+                COALESCE(SUM(CASE WHEN presentation_snapshot='45 kg' OR product='Balón 40kg' THEN quantity ELSE 0 END),0) AS balloons_45,
                 COALESCE(SUM(CASE WHEN (category_snapshot='accesorio' AND product_name_snapshot LIKE '%bidón%') OR product='Agua bidón 20L' THEN quantity ELSE 0 END),0) AS water
               FROM order_items GROUP BY order_id
             )
@@ -2822,7 +2864,7 @@ app.get('/api/reports/sales', async (req, res) => {
               COUNT(ot.id)                        AS orders,
               COALESCE(SUM(ot.total), 0)           AS revenue,
               COALESCE(SUM(ia.balloons_10), 0)     AS balloons_10,
-              COALESCE(SUM(ia.balloons_40), 0)     AS balloons_40,
+              COALESCE(SUM(ia.balloons_45), 0)     AS balloons_45,
               COALESCE(SUM(ia.water), 0)           AS water
             FROM o_totals ot
             LEFT JOIN i_agg ia ON ia.order_id = ot.id
@@ -2868,7 +2910,8 @@ app.get('/api/reports/by-product', async (req, res) => {
     const fromDate = from || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const toDate   = to || todayStr();
     res.json(rows(await db.execute({
-      sql: `SELECT oi.product, SUM(oi.quantity) as quantity, SUM(oi.subtotal) as revenue, AVG(oi.unit_price) as avg_price
+      sql: `SELECT oi.product, MAX(oi.category_snapshot) as category,
+                   SUM(oi.quantity) as quantity, SUM(oi.subtotal) as revenue, AVG(oi.unit_price) as avg_price
             FROM order_items oi JOIN orders o ON oi.order_id=o.id
             WHERE date(o.created_at, '-5 hours') BETWEEN ? AND ? AND o.status='Entregado'
             GROUP BY oi.product ORDER BY revenue DESC`,
@@ -3051,10 +3094,12 @@ app.put('/api/catalog/products/:id', async (req, res) => {
     const { name, category, description, sku, sale_price, unit, tracks_inventory, active } = req.body;
 
     // Compute the final values after merging body with existing
-    const finalActive = active !== undefined ? Boolean(active) : Boolean(existing.active);
-    const finalPrice  = sale_price !== undefined ? Number(sale_price) : Number(existing.sale_price);
+    const finalActive   = active !== undefined ? Boolean(active) : Boolean(existing.active);
+    const finalPrice    = sale_price !== undefined ? Number(sale_price) : Number(existing.sale_price);
+    const finalCategory = category !== undefined ? category : existing.category;
 
-    if (finalActive && (!finalPrice || finalPrice <= 0)) {
+    // Los "regalos" son S/0 por definición → exentos de la guarda de precio.
+    if (finalCategory !== 'regalo' && finalActive && (!finalPrice || finalPrice <= 0)) {
       return res.status(400).json({ error: 'No se puede activar un producto sin precio válido mayor que cero' });
     }
 

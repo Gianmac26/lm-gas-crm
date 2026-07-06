@@ -35,6 +35,7 @@ const SIMPLE_CATEGORIES = [
   { key: 'kit',       label: 'Kit de válvula' },
   { key: 'accesorio', label: 'Productos' },
   { key: 'servicio',  label: 'Servicios' },
+  { key: 'regalo',    label: 'Regalo' },
 ];
 
 // Orden de marcas de balón en el selector.
@@ -274,9 +275,13 @@ function ItemRow({ item, index, isLegacy, prices, available, onSetItem, onRemove
         </div>
         <div className="flex-1">
           <label className="text-xs text-gray-400 mb-1 block">Precio S/</label>
-          <input className="input !py-2 text-center" type="number" min="0" step="0.50"
-            value={item.unit_price}
-            onChange={e => onSetItem(index, 'unit_price', parseFloat(e.target.value) || 0)} />
+          {item.category_snapshot === 'regalo' ? (
+            <div className="input !py-2 text-center bg-gray-100 dark:bg-gray-600 text-gray-500 dark:text-gray-400 font-semibold">0 🎁</div>
+          ) : (
+            <input className="input !py-2 text-center" type="number" min="0" step="0.50"
+              value={item.unit_price}
+              onChange={e => onSetItem(index, 'unit_price', parseFloat(e.target.value) || 0)} />
+          )}
         </div>
         <div className="flex-1">
           <label className="text-xs text-gray-400 mb-1 block">Subtotal</label>

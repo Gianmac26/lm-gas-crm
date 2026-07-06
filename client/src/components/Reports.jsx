@@ -8,10 +8,12 @@ function fmtD(n)   { return (n||0).toFixed(0); }
 function pct(a, b) { if (!b) return '—'; return `${((a/b)*100).toFixed(0)}%`; }
 
 const PERIODS = [
-  { label: 'Hoy' },
-  { label: 'Esta semana' },
-  { label: 'Este mes' },
+  { label: 'Diario' },
+  { label: 'Semanal' },
+  { label: 'Mensual' },
 ];
+
+const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
 // Fecha cuyos campos UTC representan la hora local de Perú (UTC-5). El servidor
 // agrupa por hora de Perú, así que los rangos del cliente usan la misma base.
@@ -35,12 +37,19 @@ function weekRange(offset = 0) {
   return { from: mon.toISOString().slice(0, 10), to: sun.toISOString().slice(0, 10) };
 }
 
-// Mes actual: día 1 al último día.
-function monthRange() {
+// Mes (día 1 al último). offset=0 mes actual; offset=1 el anterior, etc.
+function monthRange(offset = 0) {
   const d = peruNow();
-  const first = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-  const last  = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
+  const first = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - offset, 1));
+  const last  = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - offset + 1, 0));
   return { from: first.toISOString().slice(0, 10), to: last.toISOString().slice(0, 10) };
+}
+
+// Etiqueta "Mes Año" del mes con el offset dado.
+function monthLabel(offset = 0) {
+  const d = peruNow();
+  const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - offset, 1));
+  return `${MESES[dt.getUTCMonth()]} ${dt.getUTCFullYear()}`;
 }
 
 function fmtDM(iso) {
@@ -53,6 +62,7 @@ export default function Reports() {
   const [tab, setTab]           = useState('diario');
   const [period, setPeriod]     = useState(1); // this week
   const [weekOffset, setWeekOffset] = useState(0); // 0=semana actual, 1=anterior…
+  const [monthOffset, setMonthOffset] = useState(0); // 0=mes actual, 1=anterior…
   const [inactiveDays, setInactiveDays] = useState(7);
   const [sales, setSales]       = useState([]);
   const [byZone, setByZone]     = useState([]);
@@ -70,7 +80,7 @@ export default function Reports() {
   // Rango según el período: Hoy = el día elegido; semana = lun–dom; mes = 1–fin.
   const range = period === 0 ? { from: dailyDate, to: dailyDate }
               : period === 1 ? weekRange(weekOffset)
-              : monthRange();
+              : monthRange(monthOffset);
 
   const loadAll = async () => {
     setLoading(true);
@@ -92,7 +102,7 @@ export default function Reports() {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { loadAll(); }, [period, inactiveDays, dailyDate, weekOffset]);
+  useEffect(() => { loadAll(); }, [period, inactiveDays, dailyDate, weekOffset, monthOffset]);
 
   const loadDaily = async (date) => {
     setDailyLoading(true);
@@ -106,7 +116,7 @@ export default function Reports() {
   useEffect(() => { if (tab === 'diario' && period === 0) loadDaily(dailyDate); }, [tab, period, dailyDate]);
 
   const totalRevenue  = sales.reduce((s, d) => s + d.revenue, 0);
-  const totalBalloons = sales.reduce((s, d) => s + d.balloons_10 + d.balloons_40, 0);
+  const totalBalloons = sales.reduce((s, d) => s + d.balloons_10 + d.balloons_45, 0);
   const totalOrders   = sales.reduce((s, d) => s + d.orders, 0);
 
   const exportInactive = () => {
@@ -128,7 +138,7 @@ export default function Reports() {
       {/* Period selector */}
       <div className="flex gap-2">
         {PERIODS.map((p, i) => (
-          <button key={i} onClick={() => { setPeriod(i); setWeekOffset(0); }}
+          <button key={i} onClick={() => { setPeriod(i); setWeekOffset(0); setMonthOffset(0); }}
             className={`flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors
               ${period === i ? 'bg-blue-900 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}>
             {p.label}
@@ -377,6 +387,17 @@ export default function Reports() {
                     <button type="button" onClick={() => setWeekOffset(o => Math.max(0, o - 1))} disabled={weekOffset === 0}
                       className={`px-3 py-1.5 rounded-lg font-bold text-lg ${weekOffset === 0 ? 'text-gray-300 dark:text-gray-600' : 'text-blue-900 dark:text-blue-400 active:bg-gray-100 dark:active:bg-gray-700'}`}>›</button>
                   </div>
+                ) : period === 2 ? (
+                  <div className="card p-2 flex items-center justify-between">
+                    <button type="button" onClick={() => setMonthOffset(o => o + 1)}
+                      className="px-3 py-1.5 rounded-lg text-blue-900 dark:text-blue-400 font-bold text-lg active:bg-gray-100 dark:active:bg-gray-700">‹</button>
+                    <div className="text-center">
+                      <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{monthLabel(monthOffset)}</div>
+                      {monthOffset === 0 && <div className="text-[10px] text-gray-400">Mes actual</div>}
+                    </div>
+                    <button type="button" onClick={() => setMonthOffset(o => Math.max(0, o - 1))} disabled={monthOffset === 0}
+                      className={`px-3 py-1.5 rounded-lg font-bold text-lg ${monthOffset === 0 ? 'text-gray-300 dark:text-gray-600' : 'text-blue-900 dark:text-blue-400 active:bg-gray-100 dark:active:bg-gray-700'}`}>›</button>
+                  </div>
                 ) : (
                   <div className="card p-3 text-center text-sm font-medium text-gray-600 dark:text-gray-300">
                     {fmtDM(range.from)} — {fmtDM(range.to)}
@@ -388,7 +409,7 @@ export default function Reports() {
                   <div key={i} className="card p-3 flex items-center justify-between">
                     <div>
                       <p className="font-semibold text-gray-800 dark:text-gray-200 text-sm">{fmtDM(d.period)}</p>
-                      <p className="text-xs text-gray-400">{d.orders} pedidos · {d.balloons_10 + d.balloons_40} balones</p>
+                      <p className="text-xs text-gray-400">{d.orders} pedidos · {d.balloons_10 + d.balloons_45} balones</p>
                     </div>
                     <span className="font-bold text-orange-500">{fmt(d.revenue)}</span>
                   </div>
@@ -423,7 +444,7 @@ export default function Reports() {
           {/* PRODUCTOS */}
           {tab === 'productos' && (
             <div className="space-y-2">
-              {byProduct.map((p, i) => (
+              {byProduct.filter(p => p.category !== 'regalo').map((p, i) => (
                 <div key={i} className="card p-4 flex items-center justify-between">
                   <div>
                     <p className="font-bold text-gray-900 dark:text-white">{p.product}</p>
@@ -432,6 +453,19 @@ export default function Reports() {
                   <span className="font-bold text-orange-500">{fmt(p.revenue)}</span>
                 </div>
               ))}
+              {byProduct.some(p => p.category === 'regalo') && (
+                <div className="pt-2">
+                  <h4 className="font-bold text-gray-800 dark:text-gray-200 text-sm mb-2">🎁 Regalos repartidos</h4>
+                  <div className="space-y-2">
+                    {byProduct.filter(p => p.category === 'regalo').map((p, i) => (
+                      <div key={i} className="card p-4 flex items-center justify-between">
+                        <p className="font-bold text-gray-900 dark:text-white">{p.product}</p>
+                        <span className="font-bold text-blue-700 dark:text-blue-400">{p.quantity} u.</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
