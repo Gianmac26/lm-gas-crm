@@ -1741,7 +1741,7 @@ app.get('/api/campaigns/templates', async (req, res) => {
   }
 
   try {
-    const url = `https://graph.facebook.com/v21.0/${WABA_ID}/message_templates?status=APPROVED&fields=name,components,category,language`;
+    const url = `https://graph.facebook.com/v21.0/${WABA_ID}/message_templates?status=APPROVED&fields=name,components,category,language,status`;
     const response = await fetch(url, {
       headers: { 'Authorization': `Bearer ${accessToken}` },
     });
