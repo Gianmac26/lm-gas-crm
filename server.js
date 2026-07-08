@@ -1915,6 +1915,37 @@ app.post('/api/campaigns/import-contacts', async (req, res) => {
   }
 });
 
+// Lista los lotes de importación existentes (conteo real y fechas) leyendo
+// directo de campaign_contacts agrupado por import_batch.
+app.get('/api/campaigns/import-batches', async (req, res) => {
+  try {
+    const batches = rows(await db.execute({
+      sql: `SELECT import_batch,
+                   COUNT(*)        AS count,
+                   MIN(created_at) AS first_at,
+                   MAX(created_at) AS last_at
+            FROM campaign_contacts
+            GROUP BY import_batch
+            ORDER BY last_at DESC`,
+      args: [],
+    }));
+    res.json(batches);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Devuelve los contactos de un lote específico, con la misma forma que el
+// import inline, para reusarlos en el wizard sin volver a subir el archivo.
+app.get('/api/campaigns/import-batches/:batch/contacts', async (req, res) => {
+  try {
+    const contacts = rows(await db.execute({
+      sql: `SELECT id, nombre, phone_normalized AS telefono, zona
+            FROM campaign_contacts WHERE import_batch = ? ORDER BY id`,
+      args: [req.params.batch],
+    })).map(c => ({ ...c, tipo: null, dias_sin_pedir: null }));
+    res.json({ import_batch: req.params.batch, contacts });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/campaigns/send', async (req, res) => {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;

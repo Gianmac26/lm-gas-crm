@@ -42,6 +42,8 @@ export default function Campaigns() {
   const [importMode, setImportMode] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importSummary, setImportSummary] = useState(null);
+  const [importBatches, setImportBatches] = useState([]);
+  const [selectedBatch, setSelectedBatch] = useState('');
 
   // UI State
   const [loading, setLoading] = useState(false);
@@ -98,16 +100,47 @@ export default function Campaigns() {
     fetchClients();
   }, [segment, filters]);
 
+  // Cargar la lista de lotes de importación existentes (para el sub-selector).
+  const loadBatches = async () => {
+    try {
+      const data = await api.get('/campaigns/import-batches').then(r => r.data);
+      setImportBatches(Array.isArray(data) ? data : []);
+    } catch { /* silencioso: si falla, solo no se muestra el sub-selector */ }
+  };
+  useEffect(() => { if (importMode) loadBatches(); }, [importMode]);
+
+  // Elegir un lote existente y cargar sus contactos (sin re-subir el archivo).
+  const handleSelectBatch = async (batch) => {
+    setSelectedBatch(batch);
+    setImportSummary(null);
+    setError(null);
+    if (!batch) { setEligibleClients([]); return; }
+    setImporting(true);
+    try {
+      const data = await api.get(`/campaigns/import-batches/${encodeURIComponent(batch)}/contacts`).then(r => r.data);
+      setEligibleClients(data.contacts);
+      setContactSource('campaign_contacts');
+    } catch (err) {
+      setError('No se pudieron cargar los contactos del lote. ' + (err?.response?.data?.error || err.message));
+      setEligibleClients([]);
+    }
+    setImporting(false);
+  };
+
   const handleImportCsv = async (file) => {
     setImporting(true);
     setError(null);
     setImportSummary(null);
+    setSelectedBatch('');
     try {
       const csvText = await file.text();
-      const data = await api.post('/campaigns/import-contacts', { csv: csvText }).then(r => r.data);
+      // Timeout ampliado SOLO para esta llamada: importar cientos de filas puede
+      // tardar más que los 10s por defecto de axios (no cambiamos el default global).
+      const data = await api.post('/campaigns/import-contacts', { csv: csvText }, { timeout: 120000 }).then(r => r.data);
       setEligibleClients(data.contacts);
       setImportSummary(data.summary);
       setContactSource('campaign_contacts');
+      loadBatches(); // refrescar la lista de lotes con el recién importado
     } catch (err) {
       const msg = err?.response?.data?.error || 'Error al importar el archivo. Intenta de nuevo.';
       setError(msg);
@@ -130,6 +163,7 @@ export default function Campaigns() {
     setImportMode(false);
     setImporting(false);
     setImportSummary(null);
+    setSelectedBatch('');
   };
 
   const handleSendCampaign = async () => {
@@ -314,6 +348,27 @@ export default function Campaigns() {
 
       {importMode && (
         <div className="bg-gray-50 rounded-lg p-4 mb-4">
+          {/* Sub-selector: reusar un lote de importación anterior */}
+          {importBatches.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">Usar una importación anterior</h3>
+              <select
+                value={selectedBatch}
+                onChange={e => handleSelectBatch(e.target.value)}
+                disabled={importing}
+                className="w-full p-2 border rounded-md"
+              >
+                <option value="">— Elige un lote —</option>
+                {importBatches.map(b => (
+                  <option key={b.import_batch} value={b.import_batch}>
+                    {b.import_batch} · {b.count} contactos{b.last_at ? ` · ${String(b.last_at).slice(0, 10)}` : ''}
+                  </option>
+                ))}
+              </select>
+              <div className="text-center text-xs text-gray-400 mt-3">— o sube un archivo nuevo —</div>
+            </div>
+          )}
+
           <h3 className="text-sm font-semibold text-gray-700 mb-3">Subir archivo CSV</h3>
           <p className="text-xs text-gray-500 mb-3">
             Columnas requeridas: <code>telefono</code>, <code>nombre_o_referencia</code>. Columna opcional: <code>zona</code>.
@@ -328,7 +383,7 @@ export default function Campaigns() {
             }}
             className="block w-full text-sm text-gray-600"
           />
-          {importing && <p className="mt-3 text-sm text-gray-500">Importando…</p>}
+          {importing && <p className="mt-3 text-sm text-gray-500">Cargando…</p>}
           {error && <p className="mt-3 text-red-500 text-sm">{error}</p>}
           {importSummary && (
             <div className="mt-3 text-sm text-gray-700 space-y-1">
@@ -338,10 +393,13 @@ export default function Campaigns() {
               {importSummary.invalidas > 0 && <p className="text-gray-500">{importSummary.invalidas} filas inválidas (omitidas).</p>}
             </div>
           )}
-          {eligibleClients.length > 0 && importSummary && (
-            <button onClick={() => setStep(2)} className="mt-4 bg-orange-500 text-white font-bold py-2 px-4 rounded-lg flex items-center">
-              Siguiente <ChevronRight size={20} className="ml-1" />
-            </button>
+          {eligibleClients.length > 0 && (
+            <div className="mt-4 flex items-center gap-3">
+              <button onClick={() => setStep(2)} className="bg-orange-500 text-white font-bold py-2 px-4 rounded-lg flex items-center">
+                Siguiente <ChevronRight size={20} className="ml-1" />
+              </button>
+              <span className="text-sm text-gray-500">{eligibleClients.length} contactos seleccionados</span>
+            </div>
           )}
         </div>
       )}
