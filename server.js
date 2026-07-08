@@ -1946,65 +1946,62 @@ app.get('/api/campaigns/import-batches/:batch/contacts', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/campaigns/send', async (req, res) => {
+async function processCampaignInBackground(campaign_id, source, template_name, template_language, variable_mapping) {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
   if (!accessToken || !phoneNumberId) {
-    return res.status(500).json({ error: 'Configuración de WhatsApp incompleta.' });
+    console.error(`[CAMPAIGN:${campaign_id}] Aborting: WhatsApp config is missing.`);
+    return;
   }
 
-  const { template_name, template_language, client_ids, variable_mapping } = req.body;
-  const source = req.body.source === 'campaign_contacts' ? 'campaign_contacts' : 'clients';
+  const pendingMessages = rows(await db.execute({
+    sql: `SELECT id, client_id, campaign_contact_id, telefono FROM campaign_logs
+          WHERE campaign_id = ? AND status = 'pending'`,
+    args: [campaign_id],
+  }));
 
-  if (!template_name || !template_language || !Array.isArray(client_ids) || !client_ids.length) {
-    return res.status(400).json({ error: 'Faltan parámetros requeridos: template_name, template_language, client_ids.' });
-  }
+  const clientIds = source === 'clients'
+    ? pendingMessages.map(m => m.client_id)
+    : [];
+  const contactIds = source === 'campaign_contacts'
+    ? pendingMessages.map(m => m.campaign_contact_id)
+    : [];
 
-  const campaign_id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  const results = [];
-  let sent = 0;
-  let failed = 0;
-
-  const clientData = rows(await db.execute({
-    sql: source === 'campaign_contacts'
-      ? `SELECT id, nombre, phone_normalized as telefono, NULL as dias_sin_pedir
-         FROM campaign_contacts
-         WHERE id IN (${client_ids.map(() => '?').join(',')})`
-      : `
+  let clientData = [];
+  if (source === 'clients' && clientIds.length) {
+    clientData = rows(await db.execute({
+      sql: `
         WITH ClientLastOrder AS (
           SELECT client_id, MAX(created_at) as last_order_date FROM orders GROUP BY client_id
         )
         SELECT
-          c.id,
-          c.name as nombre,
-          c.phone_normalized as telefono,
+          c.id, c.name as nombre, c.phone_normalized as telefono,
           COALESCE(ROUND(julianday('now') - julianday(clo.last_order_date)), NULL) as dias_sin_pedir
         FROM clients c
         LEFT JOIN ClientLastOrder clo ON c.id = clo.client_id
-        WHERE c.id IN (${client_ids.map(() => '?').join(',')})`,
-    args: client_ids,
-  }));
+        WHERE c.id IN (${clientIds.map(() => '?').join(',')})`,
+      args: clientIds,
+    }));
+  } else if (source === 'campaign_contacts' && contactIds.length) {
+    clientData = rows(await db.execute({
+      sql: `SELECT id, nombre, phone_normalized as telefono, NULL as dias_sin_pedir
+            FROM campaign_contacts
+            WHERE id IN (${contactIds.map(() => '?').join(',')})`,
+      args: contactIds,
+    }));
+  }
 
   const clientMap = new Map(clientData.map(c => [c.id, c]));
 
-  for (const clientId of client_ids) {
-    const client = clientMap.get(clientId);
-    if (!client || !client.telefono || !/^519\d{8}$/.test(client.telefono)) {
-      failed++;
-      results.push({ client_id: clientId, nombre: client?.nombre, status: 'failed', error: 'Número de teléfono inválido o ausente.' });
+  for (const msg of pendingMessages) {
+    const lookupId = source === 'clients' ? msg.client_id : msg.campaign_contact_id;
+    const client = clientMap.get(lookupId);
+
+    if (!client) {
       await db.execute({
-        sql: `INSERT INTO campaign_logs (campaign_id, client_id, campaign_contact_id, contact_source, telefono, template_name, status, error_message)
-              VALUES (?, ?, ?, ?, ?, ?, 'failed', ?)`,
-        args: [
-          campaign_id,
-          source === 'clients' ? clientId : null,
-          source === 'campaign_contacts' ? clientId : null,
-          source,
-          client?.telefono || 'N/A',
-          template_name,
-          'Número de teléfono inválido o ausente.',
-        ],
+        sql: `UPDATE campaign_logs SET status='failed', error_message='Client/contact not found at processing time' WHERE id=?`,
+        args: [msg.id]
       });
       continue;
     }
@@ -2013,7 +2010,7 @@ app.post('/api/campaigns/send', async (req, res) => {
     if (variable_mapping && Object.keys(variable_mapping).length > 0) {
         const CLIENT_DATA_FIELD_KEYS = new Set(['nombre', 'dias_sin_pedir', 'zona', 'tipo']);
         const bodyParams = Object.entries(variable_mapping)
-            .filter(([key, value]) => !isNaN(parseInt(key))) // filter only body variables
+            .filter(([key, value]) => !isNaN(parseInt(key)))
             .map(([key, value]) => {
                 let text = value;
                 if (CLIENT_DATA_FIELD_KEYS.has(value)) {
@@ -2029,10 +2026,7 @@ app.post('/api/campaigns/send', async (req, res) => {
                 return { type: 'text', text: String(text) };
             });
         if(bodyParams.length > 0){
-             components.push({
-                type: 'body',
-                parameters: bodyParams
-            });
+             components.push({ type: 'body', parameters: bodyParams });
         }
     }
 
@@ -2051,55 +2045,95 @@ app.post('/api/campaigns/send', async (req, res) => {
     try {
       const response = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
       if (response.ok) {
         status = 'sent';
-        sent++;
       } else {
         const errData = await response.json();
         status = 'failed';
         error_message = errData.error?.message || 'Error desconocido de la API de Meta.';
-        failed++;
       }
     } catch (err) {
       status = 'failed';
       error_message = err.message;
-      failed++;
     }
 
-    results.push({ client_id: clientId, nombre: client.nombre, status, error: error_message });
     await db.execute({
-      sql: `INSERT INTO campaign_logs (campaign_id, client_id, campaign_contact_id, contact_source, telefono, template_name, status, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        campaign_id,
-        source === 'clients' ? clientId : null,
-        source === 'campaign_contacts' ? clientId : null,
-        source,
-        client.telefono,
-        template_name,
-        status,
-        error_message,
-      ],
+      sql: `UPDATE campaign_logs SET status=?, error_message=?, sent_at=CURRENT_TIMESTAMP WHERE id=?`,
+      args: [status, error_message, msg.id],
     });
 
-    // Espera de 200ms
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(resolve => setTimeout(resolve, 200)); // Rate limit
+  }
+  console.log(`[CAMPAIGN:${campaign_id}] Finished processing.`);
+}
+
+app.post('/api/campaigns/send', async (req, res) => {
+  const { template_name, template_language, client_ids, variable_mapping } = req.body;
+  const source = req.body.source === 'campaign_contacts' ? 'campaign_contacts' : 'clients';
+
+  if (!template_name || !template_language || !Array.isArray(client_ids) || !client_ids.length) {
+    return res.status(400).json({ error: 'Faltan parámetros requeridos: template_name, template_language, client_ids.' });
   }
 
-  res.status(200).json({
+  const campaign_id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+  // 1. Get client data to validate phones and pre-fill logs
+  const clientData = rows(await db.execute({
+    sql: source === 'campaign_contacts'
+      ? `SELECT id, nombre, phone_normalized as telefono
+         FROM campaign_contacts
+         WHERE id IN (${client_ids.map(() => '?').join(',')})`
+      : `SELECT id, name as nombre, phone_normalized as telefono
+         FROM clients
+         WHERE id IN (${client_ids.map(() => '?').join(',')})`,
+    args: client_ids,
+  }));
+  const clientMap = new Map(clientData.map(c => [c.id, c]));
+
+  // 2. Insert all messages into campaign_logs as 'pending'
+  const tx = await db.transaction('write');
+  try {
+    for (const clientId of client_ids) {
+      const client = clientMap.get(clientId);
+      const telefono = client?.telefono;
+      const isValidPhone = telefono && /^519\d{8}$/.test(telefono);
+
+      await tx.execute({
+        sql: `INSERT INTO campaign_logs (campaign_id, client_id, campaign_contact_id, contact_source, telefono, template_name, status, error_message)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          campaign_id,
+          source === 'clients' ? clientId : null,
+          source === 'campaign_contacts' ? clientId : null,
+          source,
+          telefono || 'N/A',
+          template_name,
+          isValidPhone ? 'pending' : 'failed',
+          isValidPhone ? null : 'Número de teléfono inválido o ausente.',
+        ],
+      });
+    }
+    await tx.commit();
+  } catch (err) {
+    await tx.rollback();
+    return sendInternalError(res, 'Error al encolar campaña:', err);
+  }
+
+  // 3. Respond immediately
+  res.status(202).json({
     campaign_id,
+    status: 'En proceso',
+    message: `Campaña encolada con ${client_ids.length} destinatarios. El envío se realizará en segundo plano.`,
     total: client_ids.length,
-    sent,
-    failed,
-    results,
   });
+
+  // 4. Start background processing (fire-and-forget)
+  processCampaignInBackground(campaign_id, source, template_name, template_language, variable_mapping)
+    .catch(err => console.error(`[CAMPAIGN:${campaign_id}] Unhandled error in background processing:`, err));
 });
 
 app.get('/api/campaigns/history', async (req, res) => {
