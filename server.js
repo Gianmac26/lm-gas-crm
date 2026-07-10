@@ -443,6 +443,18 @@ async function migrateCatalogSchema() {
   await ensureColumn('orders', 'non_delivery_reason', 'TEXT');   // motivo de "No entregado"
   await ensureColumn('riders', 'pin', 'TEXT');                   // PIN de acceso del motorizado
 
+  // Rastro de auditoría del motorizado: punto y hora de salida ("En camino") y
+  // de cierre ("Entregado" / "No entregado"). Las horas se graban siempre; las
+  // coordenadas solo si el GPS respondió. No se valida ni se bloquea nada.
+  await ensureColumn('orders', 'departed_at',       'TEXT');
+  await ensureColumn('orders', 'departed_lat',      'REAL');
+  await ensureColumn('orders', 'departed_lng',      'REAL');
+  await ensureColumn('orders', 'departed_accuracy', 'REAL');
+  await ensureColumn('orders', 'closed_at',         'TEXT');
+  await ensureColumn('orders', 'closed_lat',        'REAL');
+  await ensureColumn('orders', 'closed_lng',        'REAL');
+  await ensureColumn('orders', 'closed_accuracy',   'REAL');
+
   for (const [col, def] of [
     ['product_id',            'INTEGER'],
     ['variant_id',            'INTEGER'],
@@ -2785,6 +2797,16 @@ app.put('/api/orders/:id', async (req, res) => {
   }
 });
 
+// Acepta la geolocalización solo si es un par de coordenadas terrestres válido.
+// Cualquier basura (null, undefined, NaN, fuera de rango) degrada a "sin GPS".
+function sanitizeGeo({ lat, lng, accuracy }) {
+  const la = Number(lat), ln = Number(lng), ac = Number(accuracy);
+  const ok = Number.isFinite(la) && Number.isFinite(ln) &&
+             la >= -90 && la <= 90 && ln >= -180 && ln <= 180;
+  if (!ok) return null;
+  return { lat: la, lng: ln, accuracy: Number.isFinite(ac) && ac >= 0 ? ac : null };
+}
+
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { status, reason } = req.body;
@@ -2797,8 +2819,37 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     const existing = row(await db.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [req.params.id] }));
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
 
-    const deliveredAt = status === 'Entregado' ? new Date().toISOString() : existing.delivered_at;
+    const now = new Date().toISOString();
+    const deliveredAt = status === 'Entregado' ? now : existing.delivered_at;
     const nonDeliveryReason = status === 'No entregado' ? (reason || null) : null;
+
+    // Rastro del motorizado. La hora se graba aunque el GPS haya fallado, así la
+    // alerta de demora funciona siempre. La salida se sella una sola vez (la
+    // primera marca es la real); el cierre se sobrescribe con el último.
+    const geo       = sanitizeGeo(req.body);
+    const isClosing = status === 'Entregado' || status === 'No entregado';
+    const firstDeparture = status === 'En camino' && !existing.departed_at;
+
+    const departedAt  = firstDeparture ? now : (existing.departed_at ?? null);
+    const departedLat = firstDeparture ? (geo?.lat ?? null)      : (existing.departed_lat ?? null);
+    const departedLng = firstDeparture ? (geo?.lng ?? null)      : (existing.departed_lng ?? null);
+    const departedAcc = firstDeparture ? (geo?.accuracy ?? null) : (existing.departed_accuracy ?? null);
+
+    const closedAt  = isClosing ? now                   : (existing.closed_at ?? null);
+    const closedLat = isClosing ? (geo?.lat ?? null)      : (existing.closed_lat ?? null);
+    const closedLng = isClosing ? (geo?.lng ?? null)      : (existing.closed_lng ?? null);
+    const closedAcc = isClosing ? (geo?.accuracy ?? null) : (existing.closed_accuracy ?? null);
+
+    const updateSql = `UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=?,
+                         departed_at=?, departed_lat=?, departed_lng=?, departed_accuracy=?,
+                         closed_at=?, closed_lat=?, closed_lng=?, closed_accuracy=?
+                       WHERE id=?`;
+    const updateArgs = [
+      status, deliveredAt, nonDeliveryReason,
+      departedAt, departedLat, departedLng, departedAcc,
+      closedAt, closedLat, closedLng, closedAcc,
+      req.params.id,
+    ];
 
     // H2: reconcile Crédito debt. Un pedido "no concretado" (Cancelado o No
     // entregado) no genera deuda; volver a un estado normal la restaura.
@@ -2813,12 +2864,12 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     if (debtDelta !== 0) {
       const tx = await db.transaction('write');
       try {
-        await tx.execute({ sql: 'UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=? WHERE id=?', args: [status, deliveredAt, nonDeliveryReason, req.params.id] });
+        await tx.execute({ sql: updateSql, args: updateArgs });
         await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [debtDelta, existing.client_id] });
         await tx.commit();
       } catch (txErr) { await tx.rollback(); throw txErr; }
     } else {
-      await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=? WHERE id=?', args: [status, deliveredAt, nonDeliveryReason, req.params.id] });
+      await db.execute({ sql: updateSql, args: updateArgs });
     }
 
     res.json({ ok: true });

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { riders as ridersApi, orders as ordersApi, payments as paymentsApi } from '../api.js';
+import { getPosition } from '../geo.js';
 import { RefreshCw, LogOut, MapPin, Phone, Truck, CheckCircle, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -40,7 +41,12 @@ export default function RiderInbox({ rider, onLogout }) {
 
   const setEnCamino = async (o) => {
     setBusy(o.id);
-    try { await ordersApi.updateStatus(o.id, 'En camino'); toast.success('En camino'); await load(); }
+    try {
+      const geo = await getPosition();
+      await ordersApi.updateStatus(o.id, 'En camino', null, geo);
+      toast.success('En camino');
+      await load();
+    }
     catch { toast.error('Error al actualizar'); }
     finally { setBusy(null); }
   };
@@ -66,6 +72,7 @@ export default function RiderInbox({ rider, onLogout }) {
     if (needsCobro && map && map.dests.length > 1 && !dest) { toast.error('Elige a dónde se cobró'); return; }
     setBusy(o.id);
     try {
+      const geo = await getPosition();
       if (needsCobro && map) {
         await paymentsApi.create(o.id, {
           amount: o.total,
@@ -74,7 +81,7 @@ export default function RiderInbox({ rider, onLogout }) {
           reported_by: rider.name,
         });
       }
-      await ordersApi.updateStatus(o.id, 'Entregado');
+      await ordersApi.updateStatus(o.id, 'Entregado', null, geo);
       toast.success('Pedido entregado ✅');
       setSheet(null); await load();
     } catch (e) {
@@ -87,7 +94,8 @@ export default function RiderInbox({ rider, onLogout }) {
     if (!reasonArg) { toast.error('Indica el motivo'); return; }
     setBusy(o.id);
     try {
-      await ordersApi.updateStatus(o.id, 'No entregado', reasonArg);
+      const geo = await getPosition();
+      await ordersApi.updateStatus(o.id, 'No entregado', reasonArg, geo);
       toast.success('Marcado como no entregado');
       setSheet(null); await load();
     } catch { toast.error('Error al actualizar'); }

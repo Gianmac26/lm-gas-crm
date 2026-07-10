@@ -18,11 +18,27 @@ const NEXT_STATUS = {
   'En camino': 'Entregado',
 };
 
+// Umbral de negocio: más de esto entre "En camino" y el cierre se marca para revisar.
+const SLOW_DELIVERY_MINUTES = 20;
+// Bajo este radio de error (metros) el GPS se considera confiable.
+const HIGH_ACCURACY_METERS = 50;
+
 function fmt(n) { return `S/ ${(n||0).toFixed(0)}`; }
 function fmtTime(s) {
   if (!s) return '';
   return new Date(s).toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' });
 }
+
+// Minutos entre la salida y el cierre. `null` si el pedido nunca pasó por
+// "En camino" (p. ej. lo cerró el admin directo), así no inventa alertas.
+function elapsedMinutes(o) {
+  if (!o.departed_at || !o.closed_at) return null;
+  const ms = new Date(o.closed_at) - new Date(o.departed_at);
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  return Math.round(ms / 60000);
+}
+
+const hasClosingPoint = (o) => o.closed_lat != null && o.closed_lng != null;
 
 export default function Orders() {
   const [list, setList] = useState([]);
@@ -144,10 +160,14 @@ export default function Orders() {
           {list.map(o => {
             const sc = STATUS_COLORS[o.status] || {};
             const next = NEXT_STATUS[o.status];
+            const mins = elapsedMinutes(o);
+            const slow = mins !== null && mins > SLOW_DELIVERY_MINUTES;
+            const accurate = o.closed_accuracy != null && o.closed_accuracy < HIGH_ACCURACY_METERS;
             return (
               <div key={o.id}
                 onClick={() => nav(`/orders/${o.id}/edit`)}
-                className="card p-4 cursor-pointer active:scale-[0.98] transition-transform">
+                className={`card p-4 cursor-pointer active:scale-[0.98] transition-transform
+                  ${slow ? 'border-2 border-amber-400 dark:border-amber-500' : ''}`}>
                 <div className="flex items-start gap-3">
                   <div className={`w-3 h-3 rounded-full mt-1.5 flex-shrink-0 ${sc.dot || 'bg-gray-300'}`} />
                   <div className="flex-1 min-w-0">
@@ -168,6 +188,28 @@ export default function Orders() {
                       {o.client_debt > 50 && (
                         <span className="text-xs text-red-500 font-semibold">⚠ Deuda S/{o.client_debt}</span>
                       )}
+
+                      {/* Alerta de demora: solo si superó el umbral del negocio */}
+                      {slow && (
+                        <span className="text-xs px-2 py-0.5 rounded-full font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                          ⚠ {mins} min
+                        </span>
+                      )}
+
+                      {/* Punto de cierre. Verde = GPS preciso, naranja = referencial. */}
+                      {hasClosingPoint(o) ? (
+                        <a
+                          href={`https://www.google.com/maps?q=${o.closed_lat},${o.closed_lng}`}
+                          target="_blank" rel="noopener noreferrer"
+                          onClick={ev => ev.stopPropagation()}
+                          title={`Precisión aproximada: ${Math.round(o.closed_accuracy ?? 0)} m`}
+                          className={`text-xs font-semibold underline underline-offset-2
+                            ${accurate ? 'text-green-600 dark:text-green-400' : 'text-orange-500 dark:text-orange-400'}`}>
+                          📍 ver punto
+                        </a>
+                      ) : o.closed_at ? (
+                        <span className="text-xs text-gray-300 dark:text-gray-600">📍 sin GPS</span>
+                      ) : null}
                     </div>
                     {o.items?.length > 0 && (
                       <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">

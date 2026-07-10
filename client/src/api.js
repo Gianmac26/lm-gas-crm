@@ -29,7 +29,8 @@ export const orders = {
   get:          (id)     => api.get(`/orders/${id}`).then(r => r.data),
   create:       (data)   => api.post('/orders', data).then(r => r.data),
   update:       (id, data) => api.put(`/orders/${id}`, data).then(r => r.data),
-  updateStatus: (id, status, reason) => api.patch(`/orders/${id}/status`, { status, reason }).then(r => r.data),
+  // `geo` es opcional: { lat, lng, accuracy }, o null/omitido si no hubo GPS.
+  updateStatus: (id, status, reason, geo) => api.patch(`/orders/${id}/status`, { status, reason, ...(geo || {}) }).then(r => r.data),
   delete:       (id)     => api.delete(`/orders/${id}`).then(r => r.data),
 };
 
