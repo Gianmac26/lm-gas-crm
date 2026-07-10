@@ -30,8 +30,8 @@ export default function Login({ onSuccess }) {
   const submit = async (code) => {
     setLoading(true);
     try {
-      const { ok } = await auth.verify(code);
-      if (ok) { onSuccess(); }
+      const res = await auth.verify(code);
+      if (res.ok) { onSuccess(res); }
       else {
         toast.error('PIN incorrecto');
         setPin(['', '', '', '']);

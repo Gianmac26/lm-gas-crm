@@ -3,7 +3,7 @@ import { riders } from '../api.js';
 import { Truck, Phone, Plus, Edit, Check, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-const EMPTY = { name: '', phone: '', zone: 'San Borja' };
+const EMPTY = { name: '', phone: '', zone: 'San Borja', pin: '' };
 
 export default function Riders() {
   const [list, setList]       = useState([]);
@@ -59,6 +59,13 @@ export default function Riders() {
               {['San Borja','Surco','Miraflores','Toda Lima','Otra'].map(z => <option key={z}>{z}</option>)}
             </select>
           </div>
+          <div>
+            <label className="label">PIN de acceso (4 dígitos)</label>
+            <input className="input" inputMode="numeric" maxLength={4} value={editing.pin || ''}
+              onChange={e => setEditing(p => ({ ...p, pin: e.target.value.replace(/\D/g, '').slice(0, 4) }))}
+              placeholder="ej. 4821" />
+            <p className="text-xs text-gray-400 mt-1">Con este PIN el motorizado entra a SU bandeja de entregas. Debe ser único y distinto al de admin.</p>
+          </div>
           <div className="flex gap-2">
             <button onClick={save} className="btn-primary flex-1 flex items-center justify-center gap-2">
               <Check size={16} /> Guardar
@@ -86,6 +93,7 @@ export default function Riders() {
                   <div>
                     <h3 className="font-bold text-gray-900 dark:text-white">{r.name}</h3>
                     <p className="text-sm text-gray-500 dark:text-gray-400">📍 {r.zone}</p>
+                    <p className="text-xs text-gray-400 mt-0.5">🔑 PIN: <strong>{r.pin || '— sin asignar —'}</strong></p>
                     {r.phone && (
                       <a href={`tel:${r.phone}`} className="text-sm text-blue-600 flex items-center gap-1 mt-0.5">
                         <Phone size={12} /> {r.phone}

@@ -133,17 +133,20 @@ test('POST /api/campaigns/send con source=campaign_contacts registra campaign_co
     client_ids: [contactId],
     source: 'campaign_contacts',
   });
-  assert.equal(sendRes.status, 200);
-  assert.equal(sendRes.data.failed, 1);
-  assert.equal(sendRes.data.results[0].error, 'Número de teléfono inválido o ausente.');
+  // El envío es asíncrono: responde 202 y el detalle por destinatario queda en
+  // campaign_logs (escrito antes de responder).
+  assert.equal(sendRes.status, 202);
+  assert.equal(sendRes.data.total, 1);
 
   const logRow = row(await db.execute({
-    sql: 'SELECT client_id, campaign_contact_id, contact_source FROM campaign_logs WHERE campaign_id = ? LIMIT 1',
+    sql: 'SELECT client_id, campaign_contact_id, contact_source, status, error_message FROM campaign_logs WHERE campaign_id = ? LIMIT 1',
     args: [sendRes.data.campaign_id],
   }));
   assert.equal(logRow.client_id, null);
   assert.equal(logRow.campaign_contact_id, contactId);
   assert.equal(logRow.contact_source, 'campaign_contacts');
+  assert.equal(logRow.status, 'failed');
+  assert.equal(logRow.error_message, 'Número de teléfono inválido o ausente.');
 });
 
 test('POST /api/campaigns/send con source=clients (default) registra client_id, no campaign_contact_id', async () => {
@@ -154,16 +157,17 @@ test('POST /api/campaigns/send con source=clients (default) registra client_id, 
     template_language: 'es',
     client_ids: [clientId],
   });
-  assert.equal(sendRes.status, 200);
-  assert.equal(sendRes.data.failed, 1);
+  assert.equal(sendRes.status, 202);
+  assert.equal(sendRes.data.total, 1);
 
   const logRow = row(await db.execute({
-    sql: 'SELECT client_id, campaign_contact_id, contact_source FROM campaign_logs WHERE campaign_id = ? LIMIT 1',
+    sql: 'SELECT client_id, campaign_contact_id, contact_source, status FROM campaign_logs WHERE campaign_id = ? LIMIT 1',
     args: [sendRes.data.campaign_id],
   }));
   assert.equal(logRow.client_id, clientId);
   assert.equal(logRow.campaign_contact_id, null);
   assert.equal(logRow.contact_source, 'clients');
+  assert.equal(logRow.status, 'failed'); // teléfono inválido
 });
 
 test('POST /api/campaigns/send construye el texto de variable con el fallback correcto para valores vacíos', async () => {
@@ -189,8 +193,16 @@ test('POST /api/campaigns/send construye el texto de variable con el fallback co
       source: 'campaign_contacts',
       variable_mapping: { '1': 'dias_sin_pedir' },
     });
-    assert.equal(sendRes.status, 200);
-    assert.equal(sendRes.data.sent, 1);
+    assert.equal(sendRes.status, 202);
+
+    // El envío corre en segundo plano (fire-and-forget): esperamos a que llame
+    // a la Graph API antes de restaurar el fetch original.
+    const deadline = Date.now() + 5000;
+    while (!capturedBody && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.ok(capturedBody, 'el envío en segundo plano nunca llamó a la Graph API');
+
     const sentText = capturedBody.template.components[0].parameters[0].text;
     assert.equal(sentText, 'Sin historial');
     assert.notEqual(sentText, 'dias_sin_pedir');

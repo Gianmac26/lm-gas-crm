@@ -440,6 +440,8 @@ async function migrateCatalogSchema() {
 
   // ── Extend existing tables ─────────────────────────────────────────────────
   await ensureColumn('orders', 'catalog_version', 'INTEGER DEFAULT 0');
+  await ensureColumn('orders', 'non_delivery_reason', 'TEXT');   // motivo de "No entregado"
+  await ensureColumn('riders', 'pin', 'TEXT');                   // PIN de acceso del motorizado
 
   for (const [col, def] of [
     ['product_id',            'INTEGER'],
@@ -1306,7 +1308,21 @@ app.post('/api/auth/verify', async (req, res) => {
   try {
     const { pin } = req.body;
     const cfg = await getConfig();
-    res.json({ ok: pin === cfg.pin });
+    // El PIN de admin tiene prioridad.
+    if (pin && pin === cfg.pin) {
+      return res.json({ ok: true, role: 'admin' });
+    }
+    // ¿Coincide con el PIN de un motorizado activo?
+    if (pin) {
+      const rider = row(await db.execute({
+        sql: `SELECT id, name FROM riders WHERE pin = ? AND active = 1 AND pin IS NOT NULL AND pin != '' LIMIT 1`,
+        args: [pin],
+      }));
+      if (rider) {
+        return res.json({ ok: true, role: 'rider', rider_id: rider.id, rider_name: rider.name });
+      }
+    }
+    res.json({ ok: false });
   } catch (err) { return sendInternalError(res, 'Error verificando PIN:', err); }
 });
 
@@ -2495,7 +2511,9 @@ function buildItemStmt(orderId, item) {
 }
 
 // ─── ORDER / STATUS ENUMS ──────────────────────────────────────────────────────
-const ALLOWED_ORDER_STATUSES  = ['Pendiente', 'En camino', 'Entregado', 'Cancelado'];
+const ALLOWED_ORDER_STATUSES  = ['Pendiente', 'En camino', 'Entregado', 'No entregado', 'Cancelado'];
+// Estados en los que el pedido NO se concretó → revierten la deuda de un Crédito.
+const UNFULFILLED_STATUSES    = ['Cancelado', 'No entregado'];
 const ORDER_PAYMENT_METHODS   = ['Efectivo', 'Yape', 'Plin', 'Transferencias', 'T/C', 'Crédito'];
 
 // "Crédito" (antes "Fiado") es el método que suma a la deuda del cliente.
@@ -2769,7 +2787,7 @@ app.put('/api/orders/:id', async (req, res) => {
 
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, reason } = req.body;
 
     // H4: validate status enum
     if (!ALLOWED_ORDER_STATUSES.includes(status)) {
@@ -2780,26 +2798,27 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'No encontrado' });
 
     const deliveredAt = status === 'Entregado' ? new Date().toISOString() : existing.delivered_at;
+    const nonDeliveryReason = status === 'No entregado' ? (reason || null) : null;
 
-    // H2: reconcile Crédito debt on cancel / un-cancel
+    // H2: reconcile Crédito debt. Un pedido "no concretado" (Cancelado o No
+    // entregado) no genera deuda; volver a un estado normal la restaura.
     let debtDelta = 0;
     if (existing.client_id && isCreditMethod(existing.payment_method)) {
-      if (status === 'Cancelado' && existing.status !== 'Cancelado') {
-        debtDelta = -(existing.total || 0);
-      } else if (existing.status === 'Cancelado' && status !== 'Cancelado') {
-        debtDelta = existing.total || 0;
-      }
+      const wasUnfulfilled = UNFULFILLED_STATUSES.includes(existing.status);
+      const nowUnfulfilled = UNFULFILLED_STATUSES.includes(status);
+      if (nowUnfulfilled && !wasUnfulfilled)      debtDelta = -(existing.total || 0);
+      else if (!nowUnfulfilled && wasUnfulfilled) debtDelta = existing.total || 0;
     }
 
     if (debtDelta !== 0) {
       const tx = await db.transaction('write');
       try {
-        await tx.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+        await tx.execute({ sql: 'UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=? WHERE id=?', args: [status, deliveredAt, nonDeliveryReason, req.params.id] });
         await tx.execute({ sql: 'UPDATE clients SET debt = debt + ? WHERE id = ?', args: [debtDelta, existing.client_id] });
         await tx.commit();
       } catch (txErr) { await tx.rollback(); throw txErr; }
     } else {
-      await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=? WHERE id=?', args: [status, deliveredAt, req.params.id] });
+      await db.execute({ sql: 'UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=? WHERE id=?', args: [status, deliveredAt, nonDeliveryReason, req.params.id] });
     }
 
     res.json({ ok: true });
@@ -2883,18 +2902,60 @@ app.get('/api/riders/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Bandeja del motorizado: pedidos de HOY asignados, con ítems, método/monto a
+// cobrar y estado del pago. Ordena primero "En camino", luego "Pendiente".
+app.get('/api/riders/:id/inbox', async (req, res) => {
+  try {
+    const rider = row(await db.execute({ sql: 'SELECT id, name FROM riders WHERE id=?', args: [req.params.id] }));
+    if (!rider) return res.status(404).json({ error: 'No encontrado' });
+    const today = todayStr();
+    const orderList = rows(await db.execute({
+      sql: `SELECT o.id, o.status, o.payment_method, o.total, o.notes, o.non_delivery_reason,
+                   o.created_at, o.delivered_at,
+                   c.name AS client_name, c.address AS client_address, c.phone AS client_phone,
+                   p.status AS payment_status
+            FROM orders o
+            LEFT JOIN clients c ON o.client_id = c.id
+            LEFT JOIN payments p ON p.order_id = o.id
+            WHERE o.rider_id = ? AND date(o.created_at, '-5 hours') = ?
+            ORDER BY CASE o.status WHEN 'En camino' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END, o.created_at`,
+      args: [rider.id, today],
+    }));
+    const ids = orderList.map(o => o.id);
+    let itemList = [];
+    if (ids.length) {
+      itemList = rows(await db.execute({
+        sql: `SELECT order_id, product, product_name_snapshot, category_snapshot, quantity
+              FROM order_items WHERE order_id IN (${ids.map(() => '?').join(',')})`,
+        args: ids,
+      }));
+    }
+    const orders = orderList.map(o => ({
+      ...o,
+      items: itemList.filter(i => i.order_id === o.id).map(i => ({
+        name: i.product_name_snapshot || i.product,
+        quantity: i.quantity,
+        category: i.category_snapshot,
+      })),
+    }));
+    res.json({ id: rider.id, name: rider.name, orders });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/riders', async (req, res) => {
   try {
-    const { name, phone, zone } = req.body;
-    const r = await db.execute({ sql: 'INSERT INTO riders (name, phone, zone) VALUES (?,?,?)', args: [name, phone, zone] });
+    const { name, phone, zone, pin } = req.body;
+    const cleanPin = String(pin ?? '').trim() || null;
+    const r = await db.execute({ sql: 'INSERT INTO riders (name, phone, zone, pin) VALUES (?,?,?,?)', args: [name, phone, zone, cleanPin] });
     res.json({ id: lastId(r) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/riders/:id', async (req, res) => {
   try {
-    const { name, phone, zone, active } = req.body;
-    await db.execute({ sql: 'UPDATE riders SET name=?, phone=?, zone=?, active=? WHERE id=?', args: [name, phone, zone, active ?? 1, req.params.id] });
+    const { name, phone, zone, active, pin } = req.body;
+    const cleanPin = String(pin ?? '').trim() || null;
+    await db.execute({ sql: 'UPDATE riders SET name=?, phone=?, zone=?, active=?, pin=? WHERE id=?', args: [name, phone, zone, active ?? 1, cleanPin, req.params.id] });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3529,13 +3590,14 @@ app.put('/api/config', async (req, res) => {
 
 // ─── PAYMENTS ────────────────────────────────────────────────────────────────
 
-const VALID_PAYMENT_METHODS  = ['yape', 'efectivo', 'tarjeta', 'transferencia'];
+const VALID_PAYMENT_METHODS  = ['yape', 'plin', 'efectivo', 'tarjeta', 'transferencia'];
 const VALID_CONFIRMED_BY     = ['luis', 'gisela', 'admin'];
 const VALID_HANDED_TO        = ['luis', 'gisela'];
 
 const DESTINATIONS_BY_METHOD = {
   efectivo:      ['efectivo_motorizado'],
   yape:          ['yape_luis', 'yape_gisela'],
+  plin:          ['plin_luis', 'plin_gisela'],
   tarjeta:       ['pos_lm'],
   transferencia: ['bcp_lm', 'bcp_luis', 'bcp_gisela', 'bbva_lm', 'otro'],
 };
@@ -3563,7 +3625,10 @@ async function insertPaymentEvent({ paymentId, cashHandoverId = null, eventType,
 app.post('/api/orders/:id/payments', async (req, res) => {
   try {
     const orderId = Number(req.params.id);
-    const { amount, method, destination, operation_number, notes, client_request_id } = req.body;
+    const { amount, method, destination, operation_number, notes, client_request_id, reported_by } = req.body;
+    const reportedBy = (typeof reported_by === 'string' && reported_by.trim())
+      ? reported_by.trim().slice(0, 60)
+      : 'admin';
 
     const order = row(await db.execute({
       sql: 'SELECT id, total, rider_id, status FROM orders WHERE id = ?',
@@ -3620,9 +3685,9 @@ app.post('/api/orders/:id/payments', async (req, res) => {
       sql: `INSERT INTO payments
               (order_id, amount, method, destination, operation_number, status,
                reported_by, reported_at, notes, client_request_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'reportado', 'admin', ?, ?, ?, ?, ?)`,
+            VALUES (?, ?, ?, ?, ?, 'reportado', ?, ?, ?, ?, ?, ?)`,
       args: [orderId, amt, method, destination, operation_number || null,
-             now, notes || null, client_request_id || null, now, now],
+             reportedBy, now, notes || null, client_request_id || null, now, now],
     });
     const paymentId = lastId(payResult);
 
@@ -3630,7 +3695,7 @@ app.post('/api/orders/:id/payments', async (req, res) => {
       paymentId,
       eventType: 'pago_registrado',
       newStatus: 'reportado',
-      performedBy: 'admin',
+      performedBy: reportedBy,
       notes: `${method} → ${destination}${operation_number ? ` op:${operation_number}` : ''}`,
     });
 
@@ -3649,7 +3714,7 @@ app.post('/api/orders/:id/payments', async (req, res) => {
         cashHandoverId: handoverId,
         eventType: 'efectivo_en_poder_motorizado',
         newStatus: 'en_poder_motorizado',
-        performedBy: 'admin',
+        performedBy: reportedBy,
       });
 
       handover = row(await db.execute({

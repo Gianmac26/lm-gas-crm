@@ -29,13 +29,14 @@ export const orders = {
   get:          (id)     => api.get(`/orders/${id}`).then(r => r.data),
   create:       (data)   => api.post('/orders', data).then(r => r.data),
   update:       (id, data) => api.put(`/orders/${id}`, data).then(r => r.data),
-  updateStatus: (id, status) => api.patch(`/orders/${id}/status`, { status }).then(r => r.data),
+  updateStatus: (id, status, reason) => api.patch(`/orders/${id}/status`, { status, reason }).then(r => r.data),
   delete:       (id)     => api.delete(`/orders/${id}`).then(r => r.data),
 };
 
 export const riders = {
   list:   ()       => api.get('/riders').then(r => r.data),
   get:    (id)     => api.get(`/riders/${id}`).then(r => r.data),
+  inbox:  (id)     => api.get(`/riders/${id}/inbox`).then(r => r.data),
   create: (data)   => api.post('/riders', data).then(r => r.data),
   update: (id, data) => api.put(`/riders/${id}`, data).then(r => r.data),
 };

@@ -16,6 +16,7 @@ import Conversations from './components/Conversations.jsx';
 import ConversationDetail from './components/ConversationDetail.jsx';
 import Catalog from './components/Catalog.jsx';
 import Campaigns from './components/Campaigns.jsx';
+import RiderInbox from './components/RiderInbox.jsx';
 
 export const AppContext = createContext(null);
 
@@ -23,8 +24,34 @@ export function useApp() { return useContext(AppContext); }
 
 export default function App() {
   const [authed, setAuthed] = useState(() => sessionStorage.getItem('lm_auth') === '1');
+  const [role, setRole] = useState(() => sessionStorage.getItem('lm_role') || 'admin');
+  const [rider, setRider] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem('lm_rider') || 'null'); } catch { return null; }
+  });
   const [cfg, setCfg] = useState({});
   const [darkMode, setDarkMode] = useState(false);
+
+  const handleLogin = (res) => {
+    sessionStorage.setItem('lm_auth', '1');
+    if (res?.role === 'rider') {
+      const r = { id: res.rider_id, name: res.rider_name };
+      sessionStorage.setItem('lm_role', 'rider');
+      sessionStorage.setItem('lm_rider', JSON.stringify(r));
+      setRole('rider'); setRider(r);
+    } else {
+      sessionStorage.setItem('lm_role', 'admin');
+      sessionStorage.removeItem('lm_rider');
+      setRole('admin'); setRider(null);
+    }
+    setAuthed(true);
+  };
+
+  const logout = () => {
+    sessionStorage.removeItem('lm_auth');
+    sessionStorage.removeItem('lm_role');
+    sessionStorage.removeItem('lm_rider');
+    setAuthed(false); setRole('admin'); setRider(null);
+  };
 
   useEffect(() => {
     config.get().then(c => {
@@ -45,7 +72,9 @@ export default function App() {
     config.update({ dark_mode: String(next) });
   };
 
-  if (!authed) return <Login onSuccess={() => { sessionStorage.setItem('lm_auth','1'); setAuthed(true); }} />;
+  if (!authed) return <Login onSuccess={handleLogin} />;
+
+  if (role === 'rider') return <RiderInbox rider={rider} onLogout={logout} />;
 
   return (
     <AppContext.Provider value={{ cfg, refreshConfig, toggleDark, darkMode }}>
