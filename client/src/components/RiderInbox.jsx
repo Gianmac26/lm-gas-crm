@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { riders as ridersApi, orders as ordersApi, payments as paymentsApi } from '../api.js';
+import { riders as ridersApi, orders as ordersApi, payments as paymentsApi, config as configApi } from '../api.js';
 import { getPosition } from '../geo.js';
 import { RefreshCw, LogOut, MapPin, Phone, Truck, CheckCircle, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import ReceiptButton from './OrderReceipt.jsx';
 
 // Mapea el método de pago del pedido → método/destinos del módulo de cuadre.
 const METHOD_MAP = {
@@ -23,12 +24,35 @@ const STATUS_STYLE = {
   'Cancelado':    'bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-500',
 };
 
+// Mismo criterio que el resto de la app (server.js): category_snapshot='balón'
+// o nombre que empieza con "Balón", para incluir pedidos legacy sin snapshot.
+const isBalloon = (i) => i.category === 'balón' || (i.name || '').startsWith('Balón');
+
+// Resumen del día: cobrado por medio de pago, pedidos asignados y balones
+// entregados (con su tipo). Solo cuenta lo ya "Entregado".
+function buildSummary(orders) {
+  const delivered = orders.filter(o => o.status === 'Entregado');
+  const byPayment = {};
+  for (const o of delivered) {
+    if (o.payment_method === 'Crédito') continue; // a crédito no se cobra en el momento
+    const pm = o.payment_method || 'Sin método';
+    byPayment[pm] = (byPayment[pm] || 0) + (Number(o.total) || 0);
+  }
+  const balloonItems = delivered.flatMap(o => (o.items || []).filter(isBalloon));
+  const totalBalloons = balloonItems.reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+  const byType = {};
+  for (const i of balloonItems) byType[i.name] = (byType[i.name] || 0) + (Number(i.quantity) || 0);
+  return { totalOrders: orders.length, totalBalloons, byPayment, byType };
+}
+
 export default function RiderInbox({ rider, onLogout }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null);          // id del pedido en proceso
   const [sheet, setSheet] = useState(null);        // { order, mode: 'deliver' | 'fail' }
   const [dest, setDest] = useState('');
+  const [note, setNote] = useState('');
+  const [company, setCompany] = useState({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -38,6 +62,9 @@ export default function RiderInbox({ rider, onLogout }) {
   }, [rider.id]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { configApi.get().then(setCompany).catch(() => {}); }, []);
+
+  const summary = buildSummary(orders);
 
   const setEnCamino = async (o) => {
     setBusy(o.id);
@@ -54,6 +81,7 @@ export default function RiderInbox({ rider, onLogout }) {
   const openDeliver = (o) => {
     const m = METHOD_MAP[o.payment_method];
     setDest(m && m.dests.length === 1 ? m.dests[0][0] : '');
+    setNote('');
     setSheet({ order: o, mode: 'deliver' });
   };
   const openFail = (o) => { setSheet({ order: o, mode: 'fail' }); };
@@ -81,7 +109,7 @@ export default function RiderInbox({ rider, onLogout }) {
           reported_by: rider.name,
         });
       }
-      await ordersApi.updateStatus(o.id, 'Entregado', null, geo);
+      await ordersApi.updateStatus(o.id, 'Entregado', null, geo, note);
       toast.success('Pedido entregado ✅');
       setSheet(null); await load();
     } catch (e) {
@@ -122,6 +150,43 @@ export default function RiderInbox({ rider, onLogout }) {
       </header>
 
       <main className="flex-1 max-w-2xl mx-auto w-full p-4 space-y-3">
+        {!loading && orders.length > 0 && (
+          <div className="card p-4 space-y-2">
+            <p className="text-sm font-bold text-gray-800 dark:text-gray-200">Resumen de hoy</p>
+            <div className="grid grid-cols-2 gap-2 text-center">
+              <div className="bg-gray-50 dark:bg-gray-700/40 rounded-lg p-2">
+                <div className="text-lg font-bold text-gray-900 dark:text-white">{summary.totalOrders}</div>
+                <div className="text-xs text-gray-500">Pedidos asignados</div>
+              </div>
+              <div className="bg-gray-50 dark:bg-gray-700/40 rounded-lg p-2">
+                <div className="text-lg font-bold text-blue-600">{summary.totalBalloons}</div>
+                <div className="text-xs text-gray-500">Balones entregados</div>
+              </div>
+            </div>
+            {Object.keys(summary.byPayment).length > 0 && (
+              <div className="text-sm">
+                <p className="text-xs text-gray-400 mb-1">Cobrado por medio de pago</p>
+                {Object.entries(summary.byPayment).map(([pm, total]) => (
+                  <div key={pm} className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-300">{pm}</span>
+                    <span className="font-semibold text-gray-900 dark:text-white">{fmt(total)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {Object.keys(summary.byType).length > 0 && (
+              <div className="text-sm">
+                <p className="text-xs text-gray-400 mb-1">Tipo de balón entregado</p>
+                {Object.entries(summary.byType).map(([name, qty]) => (
+                  <div key={name} className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-300">{name}</span>
+                    <span className="font-semibold text-gray-900 dark:text-white">{qty}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center h-64"><div className="animate-spin text-4xl">🛵</div></div>
         ) : orders.length === 0 ? (
@@ -179,6 +244,13 @@ export default function RiderInbox({ rider, onLogout }) {
               {o.status === 'No entregado' && o.non_delivery_reason && (
                 <p className="text-xs text-red-500">Motivo: {o.non_delivery_reason}</p>
               )}
+              {o.rider_note && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 italic">💬 {o.rider_note}</p>
+              )}
+
+              {/* Nota de pedido: disponible siempre, para mostrarla frente al cliente */}
+              <ReceiptButton order={o} company={company}
+                className="w-full py-2 rounded-xl bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 text-sm font-medium disabled:opacity-50" />
 
               {/* Acciones */}
               {o.status === 'Pendiente' && (
@@ -212,6 +284,7 @@ export default function RiderInbox({ rider, onLogout }) {
             <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto" />
             {sheet.mode === 'deliver' ? (
               <DeliverSheet order={sheet.order} info={cobroInfo(sheet.order)} dest={dest} setDest={setDest}
+                note={note} setNote={setNote}
                 busy={busy === sheet.order.id} onCancel={() => setSheet(null)} onConfirm={confirmDeliver} />
             ) : (
               <FailSheet order={sheet.order}
@@ -224,7 +297,7 @@ export default function RiderInbox({ rider, onLogout }) {
   );
 }
 
-function DeliverSheet({ order, info, dest, setDest, busy, onCancel, onConfirm }) {
+function DeliverSheet({ order, info, dest, setDest, note, setNote, busy, onCancel, onConfirm }) {
   const { isCredit, isFree, needsCobro, map } = info;
   return (
     <>
@@ -259,6 +332,13 @@ function DeliverSheet({ order, info, dest, setDest, busy, onCancel, onConfirm })
       ) : (
         <div className="bg-green-50 dark:bg-green-900/20 rounded-xl p-3 text-sm text-green-600 text-center">El pago ya estaba registrado.</div>
       )}
+
+      <div>
+        <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Comentario (opcional)</label>
+        <textarea value={note} onChange={e => setNote(e.target.value)} rows={2} maxLength={300}
+          placeholder="Ej: el cliente pagó efectivo en vez de Yape"
+          className="w-full mt-1 p-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 text-sm" />
+      </div>
 
       <div className="flex gap-2 pt-1">
         <button onClick={onCancel} disabled={busy} className="flex-1 py-3 rounded-xl bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 font-medium disabled:opacity-50">Cancelar</button>

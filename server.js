@@ -121,6 +121,10 @@ async function initDb() {
     pin: '1234', daily_goal: '80', price_10kg: '38', price_40kg: '120',
     price_water: '12', price_cleaning: '15',
     zones: 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra', dark_mode: 'false',
+    company_name:    'L Y M DISTRIBUCIONES S.R.L.',
+    company_ruc:     '20600462980',
+    company_address: 'Calle el Greco 274 Dpto. 201, San Borja',
+    company_phones:  '+51 940 182 987 / +51 998 275 775 / +51 933 686 061',
   };
   await Promise.all(
     Object.entries(defaults).map(([k, v]) =>
@@ -454,6 +458,7 @@ async function migrateCatalogSchema() {
   await ensureColumn('orders', 'closed_lat',        'REAL');
   await ensureColumn('orders', 'closed_lng',        'REAL');
   await ensureColumn('orders', 'closed_accuracy',   'REAL');
+  await ensureColumn('orders', 'rider_note',        'TEXT');   // comentario libre del motorizado al entregar
 
   for (const [col, def] of [
     ['product_id',            'INTEGER'],
@@ -2809,7 +2814,7 @@ function sanitizeGeo({ lat, lng, accuracy }) {
 
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
-    const { status, reason } = req.body;
+    const { status, reason, note } = req.body;
 
     // H4: validate status enum
     if (!ALLOWED_ORDER_STATUSES.includes(status)) {
@@ -2822,6 +2827,10 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     const now = new Date().toISOString();
     const deliveredAt = status === 'Entregado' ? now : existing.delivered_at;
     const nonDeliveryReason = status === 'No entregado' ? (reason || null) : null;
+
+    // Comentario libre del motorizado (ej. "cliente pagó efectivo en vez de
+    // Yape"). Se ofrece al entregar; si no manda nada se conserva lo que había.
+    const riderNote = (typeof note === 'string' && note.trim()) ? note.trim().slice(0, 300) : existing.rider_note ?? null;
 
     // Rastro del motorizado. La hora se graba aunque el GPS haya fallado, así la
     // alerta de demora funciona siempre. La salida se sella una sola vez (la
@@ -2840,12 +2849,12 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     const closedLng = isClosing ? (geo?.lng ?? null)      : (existing.closed_lng ?? null);
     const closedAcc = isClosing ? (geo?.accuracy ?? null) : (existing.closed_accuracy ?? null);
 
-    const updateSql = `UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=?,
+    const updateSql = `UPDATE orders SET status=?, delivered_at=?, non_delivery_reason=?, rider_note=?,
                          departed_at=?, departed_lat=?, departed_lng=?, departed_accuracy=?,
                          closed_at=?, closed_lat=?, closed_lng=?, closed_accuracy=?
                        WHERE id=?`;
     const updateArgs = [
-      status, deliveredAt, nonDeliveryReason,
+      status, deliveredAt, nonDeliveryReason, riderNote,
       departedAt, departedLat, departedLng, departedAcc,
       closedAt, closedLat, closedLng, closedAcc,
       req.params.id,
@@ -2961,7 +2970,7 @@ app.get('/api/riders/:id/inbox', async (req, res) => {
     if (!rider) return res.status(404).json({ error: 'No encontrado' });
     const today = todayStr();
     const orderList = rows(await db.execute({
-      sql: `SELECT o.id, o.status, o.payment_method, o.total, o.notes, o.non_delivery_reason,
+      sql: `SELECT o.id, o.status, o.payment_method, o.total, o.notes, o.non_delivery_reason, o.rider_note,
                    o.created_at, o.delivered_at,
                    c.name AS client_name, c.address AS client_address, c.phone AS client_phone,
                    p.status AS payment_status
@@ -2976,7 +2985,7 @@ app.get('/api/riders/:id/inbox', async (req, res) => {
     let itemList = [];
     if (ids.length) {
       itemList = rows(await db.execute({
-        sql: `SELECT order_id, product, product_name_snapshot, category_snapshot, quantity
+        sql: `SELECT order_id, product, product_name_snapshot, category_snapshot, quantity, unit_price, subtotal
               FROM order_items WHERE order_id IN (${ids.map(() => '?').join(',')})`,
         args: ids,
       }));
@@ -2987,6 +2996,8 @@ app.get('/api/riders/:id/inbox', async (req, res) => {
         name: i.product_name_snapshot || i.product,
         quantity: i.quantity,
         category: i.category_snapshot,
+        unit_price: i.unit_price,
+        subtotal: i.subtotal,
       })),
     }));
     res.json({ id: rider.id, name: rider.name, orders });

@@ -12,6 +12,7 @@ export default function Config() {
     price_10kg: '38', price_45kg: '120',
     price_water: '12', price_cleaning: '15',
     zones: 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra',
+    company_name: '', company_ruc: '', company_address: '', company_phones: '',
   });
   const [showPin, setShowPin] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -25,6 +26,10 @@ export default function Config() {
       price_water:   c.price_water   || '12',
       price_cleaning:c.price_cleaning|| '15',
       zones:         c.zones         || 'San Borja,Surco,Surquillo,Miraflores,San Luis,San Isidro,Otra',
+      company_name:    c.company_name    || '',
+      company_ruc:     c.company_ruc     || '',
+      company_address: c.company_address || '',
+      company_phones:  c.company_phones  || '',
     })));
   }, []);
 
@@ -42,6 +47,10 @@ export default function Config() {
         price_water:    form.price_water,
         price_cleaning: form.price_cleaning,
         zones:          form.zones,
+        company_name:    form.company_name,
+        company_ruc:     form.company_ruc,
+        company_address: form.company_address,
+        company_phones:  form.company_phones,
       };
       if (form.pin) payload.pin = form.pin;
       await config.update(payload);
@@ -95,6 +104,28 @@ export default function Config() {
             <button onClick={() => set('daily_goal', String(parseInt(form.daily_goal) + 10))}
               className="w-10 h-10 rounded-xl bg-gray-100 dark:bg-gray-700 font-bold text-lg">+</button>
           </div>
+        </div>
+      </div>
+
+      {/* Datos de la empresa (para la Nota de pedido) */}
+      <div className="card p-4 space-y-3">
+        <h2 className="font-bold text-gray-800 dark:text-gray-200 text-base">🏢 Datos de la empresa</h2>
+        <p className="text-xs text-gray-400 -mt-1">Aparecen en la Nota de pedido que se envía al cliente.</p>
+        <div>
+          <label className="label">Razón social</label>
+          <input className="input" value={form.company_name} onChange={e => set('company_name', e.target.value)} placeholder="L Y M DISTRIBUCIONES S.R.L." />
+        </div>
+        <div>
+          <label className="label">RUC</label>
+          <input className="input" value={form.company_ruc} onChange={e => set('company_ruc', e.target.value)} placeholder="20600462980" />
+        </div>
+        <div>
+          <label className="label">Domicilio fiscal</label>
+          <input className="input" value={form.company_address} onChange={e => set('company_address', e.target.value)} placeholder="Calle el Greco 274 Dpto. 201, San Borja" />
+        </div>
+        <div>
+          <label className="label">Teléfonos</label>
+          <input className="input" value={form.company_phones} onChange={e => set('company_phones', e.target.value)} placeholder="+51 940 182 987 / +51 998 275 775" />
         </div>
       </div>
 

@@ -30,7 +30,8 @@ export const orders = {
   create:       (data)   => api.post('/orders', data).then(r => r.data),
   update:       (id, data) => api.put(`/orders/${id}`, data).then(r => r.data),
   // `geo` es opcional: { lat, lng, accuracy }, o null/omitido si no hubo GPS.
-  updateStatus: (id, status, reason, geo) => api.patch(`/orders/${id}/status`, { status, reason, ...(geo || {}) }).then(r => r.data),
+  // `note` es opcional: comentario libre del motorizado al entregar.
+  updateStatus: (id, status, reason, geo, note) => api.patch(`/orders/${id}/status`, { status, reason, note, ...(geo || {}) }).then(r => r.data),
   delete:       (id)     => api.delete(`/orders/${id}`).then(r => r.data),
 };
 

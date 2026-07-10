@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { orders as ordersApi, riders } from '../api.js';
+import { orders as ordersApi, riders, config as configApi } from '../api.js';
 import { Plus, ChevronRight, RefreshCw } from 'lucide-react';
 import toast from 'react-hot-toast';
+import ReceiptButton from './OrderReceipt.jsx';
 
 const STATUSES = ['Todos', 'Pendiente', 'En camino', 'Entregado', 'Cancelado'];
 
@@ -47,9 +48,11 @@ export default function Orders() {
   const [filterRider, setFilterRider] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0,10));
   const [loading, setLoading] = useState(true);
+  const [company, setCompany] = useState({});
   const nav = useNavigate();
 
   useEffect(() => { riders.list().then(setRiderList); }, []);
+  useEffect(() => { configApi.get().then(setCompany).catch(() => {}); }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -216,20 +219,32 @@ export default function Orders() {
                         {o.items.map(i => `${i.quantity}x ${i.product}`).join(' · ')}
                       </div>
                     )}
+                    {o.rider_note && (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 italic mt-1">💬 {o.rider_note}</p>
+                    )}
                   </div>
                 </div>
 
-                {/* Quick status change */}
-                {next && (
-                  <div className="mt-3 flex justify-end">
+                {/* Nota de pedido + cambio rápido de estado */}
+                <div className="mt-3 flex items-center justify-between gap-2" onClick={ev => ev.stopPropagation()}>
+                  <ReceiptButton
+                    order={{ ...o, items: o.items?.map(i => ({
+                      name: i.product_name_snapshot || i.product,
+                      quantity: i.quantity, unit_price: i.unit_price, subtotal: i.subtotal,
+                      category: i.category_snapshot,
+                    })) }}
+                    company={company}
+                    className="text-xs font-medium px-4 py-2 rounded-xl bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                  />
+                  {next && (
                     <button
                       onClick={ev => quickStatus(ev, o.id, next)}
                       className={`text-xs font-semibold px-4 py-2 rounded-xl transition-colors
                         ${next === 'En camino' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'}`}>
                       → {next}
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             );
           })}
