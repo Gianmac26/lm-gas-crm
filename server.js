@@ -7,6 +7,7 @@ const {
   db, PERU_TZ_OFFSET, todayStr, rows, row, lastId,
   normalizePhone, isoNow, whatsappTimestamp, tableColumns, ensureColumn,
 } = require('./lib/db');
+const { classifyBalloon, buildPurchaseHistory } = require('./lib/purchaseHistory');
 
 const app = express();
 const DEFAULT_WHATSAPP_API_VERSION = 'v21.0';
@@ -2423,6 +2424,77 @@ app.get('/api/clients/:id', async (req, res) => {
       items: itemList.filter(i => i.order_id === o.id),
     }));
     res.json({ ...client, orders: ordersWithItems });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Historial completo de compras de balones de un cliente, con días de duración
+// y promedio por tipo (10kg Normal / 10kg Premium / 45kg), para el recibo histórico en PDF.
+app.get('/api/clients/:id/purchase-history', async (req, res) => {
+  try {
+    const client = row(await db.execute({ sql: 'SELECT * FROM clients WHERE id = ?', args: [req.params.id] }));
+    if (!client) return res.status(404).json({ error: 'No encontrado' });
+
+    const orderList = rows(await db.execute({
+      sql: `SELECT o.id, o.created_at, date(o.created_at, '-5 hours') AS order_date_local, r.name AS rider_name
+            FROM orders o
+            LEFT JOIN riders r ON o.rider_id = r.id
+            WHERE o.client_id = ? AND o.status != 'Cancelado'
+            ORDER BY o.created_at ASC`,
+      args: [req.params.id],
+    }));
+
+    let itemList = [];
+    if (orderList.length) {
+      const ids = orderList.map(o => o.id);
+      itemList = rows(await db.execute({
+        sql: `SELECT * FROM order_items WHERE order_id IN (${ids.map(() => '?').join(',')})`,
+        args: ids,
+      }));
+    }
+
+    const ordersById = new Map(orderList.map(o => [o.id, o]));
+    const records = itemList
+      .map(item => ({ item, type: classifyBalloon(item) }))
+      .filter(({ type }) => type)
+      .map(({ item, type }) => {
+        const order = ordersById.get(item.order_id);
+        const price = item.subtotal ?? (item.quantity != null && item.unit_price != null ? item.quantity * item.unit_price : null);
+        return {
+          orderId: item.order_id,
+          itemId: item.id,
+          dateTime: order.created_at,
+          dateLocal: order.order_date_local,
+          type,
+          quantity: item.quantity ?? null,
+          price,
+          brand: item.brand_snapshot ?? null,
+          riderName: order.rider_name ?? null,
+        };
+      });
+
+    const { history, averages } = buildPurchaseHistory(records);
+
+    res.json({
+      client: {
+        id: client.id,
+        name: client.name,
+        address: client.address,
+        phone: client.phone,
+        type: client.type,
+        business_type: client.business_type,
+      },
+      history: history.map(h => ({
+        order_id: h.orderId,
+        date: h.dateTime,
+        type: h.type,
+        brand: h.brand,
+        quantity: h.quantity,
+        price: h.price,
+        rider_name: h.riderName,
+        dias_duracion: h.dias_duracion,
+      })),
+      averages,
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

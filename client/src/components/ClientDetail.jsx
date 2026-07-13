@@ -6,6 +6,7 @@ import {
   Star, Package, Clock, ChevronLeft, AlertTriangle, MessageSquare
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import GenerateReceiptButton from './ReceiptPDF.jsx';
 
 const STATUS_BADGE = {
   'Pendiente':  'badge-pending',
@@ -182,6 +183,13 @@ export default function ClientDetail() {
       >
         <Plus size={18} /> Nuevo Pedido
       </button>
+
+      {/* Receipt PDF */}
+      <GenerateReceiptButton
+        clientId={id}
+        clientName={client.name}
+        className="btn-secondary w-full flex items-center justify-center gap-2"
+      />
 
       {/* Order history */}
       <div>

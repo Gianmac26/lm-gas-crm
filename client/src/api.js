@@ -16,6 +16,7 @@ export const clients = {
   create: (data)   => api.post('/clients', data).then(r => r.data),
   update: (id, data) => api.put(`/clients/${id}`, data).then(r => r.data),
   delete: (id)     => api.delete(`/clients/${id}`).then(r => r.data),
+  purchaseHistory: (id) => api.get(`/clients/${id}/purchase-history`).then(r => r.data),
   exportUrl: (params = {}) => {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v != null && v !== '')
