@@ -1,5 +1,7 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const ExcelJS = require('exceljs');
 const {
   db, PERU_TZ_OFFSET, todayStr, rows, row, lastId,
@@ -12,7 +14,11 @@ const WHATSAPP_SEND_TIMEOUT_MS = 10000;
 const MAX_WHATSAPP_TEXT_LENGTH = 4096;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 
 // ─── DB INIT (lazy, runs once before first request) ───────────────────────────
 let _initPromise = null;
@@ -1309,8 +1315,29 @@ app.get('/webhook/whatsapp', (req, res) => {
   res.sendStatus(403);
 });
 
+// Verifica la firma X-Hub-Signature-256 que Meta envía en cada POST del webhook.
+function isValidWhatsappSignature(req) {
+  const signatureHeader = req.get('X-Hub-Signature-256');
+  const appSecret = process.env.WHATSAPP_APP_SECRET;
+  if (!signatureHeader || !appSecret || !req.rawBody) return false;
+
+  const expectedSignature = 'sha256=' + crypto
+    .createHmac('sha256', appSecret)
+    .update(req.rawBody)
+    .digest('hex');
+
+  const receivedBuf = Buffer.from(signatureHeader);
+  const expectedBuf = Buffer.from(expectedSignature);
+  if (receivedBuf.length !== expectedBuf.length) return false;
+
+  return crypto.timingSafeEqual(receivedBuf, expectedBuf);
+}
+
 // Recepción de mensajes (POST)
 app.post('/webhook/whatsapp', async (req, res) => {
+  if (!isValidWhatsappSignature(req)) {
+    return res.sendStatus(403);
+  }
   try {
     await processWhatsappWebhook(req.body);
     res.sendStatus(200);
