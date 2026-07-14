@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Document, Page, View, Text, StyleSheet, Svg, Rect, pdf } from '@react-pdf/renderer';
+import { Document, Page, View, Text, StyleSheet, Svg, Rect, Line, pdf } from '@react-pdf/renderer';
 import toast from 'react-hot-toast';
 import { clients as clientsApi, config as configApi } from '../api.js';
 
@@ -125,16 +125,30 @@ function selectChartBars(history) {
   return { bars, types: Object.keys(byType), truncated };
 }
 
+// Escala del eje Y: 0-60 días por defecto, en marcas de 10. Si algún valor
+// real supera 60, el eje se expande (siempre múltiplo de 10) para no cortar
+// nunca una barra.
+const DEFAULT_AXIS_MAX = 60;
+const AXIS_STEP = 10;
+
 function DurationChart({ history }) {
   const { bars, types, truncated } = selectChartBars(history);
   if (!bars.length) return null;
 
   const width = 531; // ancho útil de página A4 (595 - 2*32 de padding)
+  const leftMargin = 22; // espacio para las etiquetas del eje Y
+  const plotWidth = width - leftMargin;
   const chartHeight = 92;
   const baseline = 68;
   const maxBarHeight = 58;
-  const maxDays = Math.max(1, ...bars.map(b => b.dias_duracion));
-  const slot = width / bars.length;
+
+  const maxDays = Math.max(0, ...bars.map(b => b.dias_duracion));
+  const axisMax = Math.max(DEFAULT_AXIS_MAX, Math.ceil(maxDays / AXIS_STEP) * AXIS_STEP);
+  const ticks = [];
+  for (let v = 0; v <= axisMax; v += AXIS_STEP) ticks.push(v);
+  const tickY = (v) => baseline - (v / axisMax) * maxBarHeight;
+
+  const slot = plotWidth / bars.length;
   const barWidth = Math.max(6, Math.min(26, slot * 0.55));
 
   return (
@@ -156,9 +170,21 @@ function DurationChart({ history }) {
         <Text style={styles.mutedNote}>Mostrando las últimas {MAX_BARS_PER_TYPE} recompras por tipo.</Text>
       )}
       <Svg width={width} height={chartHeight}>
+        {ticks.map(v => (
+          <React.Fragment key={`tick-${v}`}>
+            <Line
+              x1={leftMargin} x2={width} y1={tickY(v)} y2={tickY(v)}
+              stroke={v === 0 ? MUTED : BORDER} strokeWidth={v === 0 ? 0.75 : 0.5}
+            />
+            <Text x={leftMargin - 4} y={tickY(v) + 2} textAnchor="end" style={{ fontSize: 6, fill: MUTED }}>
+              {v}
+            </Text>
+          </React.Fragment>
+        ))}
+        <Line x1={leftMargin} x2={leftMargin} y1={tickY(axisMax)} y2={baseline} stroke={MUTED} strokeWidth={0.75} />
         {bars.map((b, i) => {
-          const x = i * slot + (slot - barWidth) / 2;
-          const h = Math.max(3, (b.dias_duracion / maxDays) * maxBarHeight);
+          const x = leftMargin + i * slot + (slot - barWidth) / 2;
+          const h = Math.max(3, (b.dias_duracion / axisMax) * maxBarHeight);
           const y = baseline - h;
           const color = TYPE_COLORS[b.type] || ACCENT;
           return (
