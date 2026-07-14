@@ -2333,7 +2333,10 @@ app.get('/api/clients', async (req, res) => {
     if (q)    { sql += ` AND (c.name LIKE ? OR c.address LIKE ? OR c.phone LIKE ?)`; const p = `%${q}%`; args.push(p, p, p); }
     if (zone) { sql += ` AND c.zone = ?`;  args.push(zone); }
     if (type) { sql += ` AND c.type = ?`;  args.push(type); }
-    sql += sort === 'name' ? ` ORDER BY c.name ASC` : ` ORDER BY last_order ASC NULLS FIRST`;
+    if (sort === 'name')             sql += ` ORDER BY c.name ASC`;
+    else if (sort === 'orders_desc') sql += ` ORDER BY order_count DESC`;
+    else if (sort === 'recent')      sql += ` ORDER BY last_order DESC NULLS LAST`;
+    else                              sql += ` ORDER BY last_order ASC NULLS FIRST`;
     res.json(rows(await db.execute({ sql, args })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

@@ -1,14 +1,76 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { clients } from '../api.js';
-import { Plus, Search, Star, ChevronRight, MapPin, Users2, Download } from 'lucide-react';
+import { Plus, Search, Star, ChevronRight, ChevronDown, MapPin, Users2, Download } from 'lucide-react';
 
-const ZONES = ['Todas', 'San Borja', 'Surco', 'Surquillo', 'Miraflores', 'Otra'];
-const TYPES = ['Todos', 'Residencial', 'Negocio'];
+const ZONE_OPTIONS = [
+  { value: '', label: 'Todas' },
+  { value: 'San Borja', label: 'San Borja' },
+  { value: 'Surco', label: 'Surco' },
+  { value: 'Surquillo', label: 'Surquillo' },
+  { value: 'Miraflores', label: 'Miraflores' },
+  { value: 'Otra', label: 'Otra' },
+];
+const TYPE_OPTIONS = [
+  { value: '', label: 'Todos' },
+  { value: 'Residencial', label: 'Residencial' },
+  { value: 'Negocio', label: 'Negocio' },
+];
+const SORT_OPTIONS = [
+  { value: '', label: 'Pedido más antiguo' },
+  { value: 'recent', label: 'Pedido más reciente' },
+  { value: 'orders_desc', label: 'Más pedidos primero' },
+];
 
 function daysAgo(dateStr) {
   if (!dateStr) return null;
   return Math.floor((Date.now() - new Date(dateStr)) / 86400000);
+}
+
+// Botón que despliega una lista de opciones (distrito, tipo de cliente, orden).
+// Muestra el nombre de la opción seleccionada; el primer valor de `options`
+// se trata como el "sin filtro" (no resalta el botón cuando está activo).
+function FilterDropdown({ label, value, options, onChange, activeClass }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClickOutside = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [open]);
+
+  const selected = options.find(o => o.value === value) || options[0];
+  const isActive = selected.value !== options[0].value;
+
+  return (
+    <div className="relative flex-shrink-0" ref={ref}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors
+          ${isActive ? activeClass : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}
+      >
+        {isActive ? selected.label : label}
+        <ChevronDown size={14} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 min-w-[10rem] rounded-xl bg-white dark:bg-gray-800 shadow-lg border border-gray-100 dark:border-gray-700 py-1">
+          {options.map(o => (
+            <button
+              key={o.value || 'all'}
+              onClick={() => { onChange(o.value); setOpen(false); }}
+              className={`block w-full text-left px-4 py-2 text-sm whitespace-nowrap
+                ${o.value === value ? 'font-semibold text-blue-900 dark:text-blue-400' : 'text-gray-700 dark:text-gray-300'}
+                hover:bg-gray-50 dark:hover:bg-gray-700`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Clients() {
@@ -16,24 +78,33 @@ export default function Clients() {
   const [q, setQ] = useState('');
   const [zone, setZone] = useState('');
   const [type, setType] = useState('');
+  const [sort, setSort] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const nav = useNavigate();
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
       const params = {};
       if (q)    params.q    = q;
-      if (zone && zone !== 'Todas') params.zone = zone;
-      if (type && type !== 'Todos') params.type = type;
-      setList(await clients.list(params));
+      if (zone) params.zone = zone;
+      if (type) params.type = type;
+      if (sort) params.sort = sort;
+      const data = await clients.list(params);
+      if (seq === loadSeq.current) setList(data);
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Error al cargar clientes');
-      setList([]);
-    } finally { setLoading(false); }
-  }, [q, zone, type]);
+      if (seq === loadSeq.current) {
+        setError(err.response?.data?.error || err.message || 'Error al cargar clientes');
+        setList([]);
+      }
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
+  }, [q, zone, type, sort]);
 
   useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [load]);
 
@@ -59,32 +130,19 @@ export default function Clients() {
       </div>
 
       {/* Filters */}
-      <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-        {ZONES.map(z => (
-          <button
-            key={z}
-            onClick={() => setZone(z === 'Todas' ? '' : z)}
-            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors
-              ${(zone === z || (!zone && z === 'Todas'))
-                ? 'bg-blue-900 text-white'
-                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}
-          >
-            {z}
-          </button>
-        ))}
-        <div className="w-px bg-gray-200 dark:bg-gray-700 mx-1" />
-        {TYPES.map(t => (
-          <button
-            key={t}
-            onClick={() => setType(t === 'Todos' ? '' : t)}
-            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors
-              ${(type === t || (!type && t === 'Todos'))
-                ? 'bg-orange-500 text-white'
-                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'}`}
-          >
-            {t}
-          </button>
-        ))}
+      <div className="flex flex-wrap gap-2 pb-1">
+        <FilterDropdown
+          label="Distrito" value={zone} options={ZONE_OPTIONS} onChange={setZone}
+          activeClass="bg-blue-900 text-white"
+        />
+        <FilterDropdown
+          label="Tipo de cliente" value={type} options={TYPE_OPTIONS} onChange={setType}
+          activeClass="bg-orange-500 text-white"
+        />
+        <FilterDropdown
+          label="Ordenar por" value={sort} options={SORT_OPTIONS} onChange={setSort}
+          activeClass="bg-gray-700 text-white dark:bg-gray-600"
+        />
       </div>
 
       {/* Count + add */}
